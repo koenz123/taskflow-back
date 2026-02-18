@@ -1,0 +1,36 @@
+services:
+  mongo:
+    image: mongo:7
+    command: ["mongod", "--bind_ip_all"]
+    volumes:
+      - taskflow_mongo_data:/data/db
+    restart: unless-stopped
+
+  taskflow-back:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    ports:
+      - "4000:4000"
+    environment:
+      NODE_ENV: development
+      PORT: "4000"
+      APP_BASE_URL: ${APP_BASE_URL}
+      MONGODB_URI: ${MONGODB_URI:-mongodb://mongo:27017/taskflow}
+      EVENTS_TO_CONSOLE: ${EVENTS_TO_CONSOLE:-1}
+    init: true
+    depends_on:
+      - mongo
+    volumes:
+      - ./:/app
+      - /app/node_modules
+      - taskflow_back_data:/app/data
+      - taskflow_back_uploads:/app/uploads
+    restart: unless-stopped
+
+volumes:
+  taskflow_back_data:
+  taskflow_back_uploads:
+  taskflow_mongo_data:
+

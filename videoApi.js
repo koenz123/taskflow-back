@@ -2,9 +2,10 @@ import path from 'node:path'
 import { promises as fs } from 'node:fs'
 import express from 'express'
 import multer from 'multer'
+import { logBusinessEvent } from './logBusinessEvent.js'
 
-export function createVideoApi({ worksFile, uploadsDir, maxFileBytes }) {
-  const router = express()
+export function createVideoApi({ worksFile, uploadsDir, maxFileBytes, audit = null, logEvent = null }) {
+  const router = express.Router()
 
   const DATA_DIR = path.dirname(worksFile)
   const UPLOADS_DIR = uploadsDir
@@ -75,6 +76,19 @@ export function createVideoApi({ worksFile, uploadsDir, maxFileBytes }) {
     return false
   }
 
+  function normalizeSource(value) {
+    if (value == null) return null
+    const s = String(value).trim()
+    if (!s) return null
+    if (s.length > 50) return null
+    return s
+  }
+
+  function getActionSource(req, fallback) {
+    const header = req.headers['x-event-source'] ?? req.headers['x-task-source'] ?? null
+    return normalizeSource(req.body?.source ?? header) ?? fallback ?? 'manual'
+  }
+
   const storage = multer.diskStorage({
     // IMPORTANT: multer expects cb(...) when destination is a function.
     // Returning a string here can cause the request to hang.
@@ -128,7 +142,6 @@ export function createVideoApi({ worksFile, uploadsDir, maxFileBytes }) {
 
   router.get('/api/users/:userId/works', async (req, res, next) => {
     try {
-      console.log('[videoApi] list works: start', { userId: req.params.userId })
       const works = await readWorks()
       let changed = false
 
@@ -161,11 +174,6 @@ export function createVideoApi({ worksFile, uploadsDir, maxFileBytes }) {
       const filtered = normalized
         .filter((work) => work.ownerId === req.params.userId && isMediaUrlValid(work.mediaUrl))
         .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
-      console.log('[videoApi] list works: ok', {
-        userId: req.params.userId,
-        count: filtered.length,
-        changed,
-      })
       res.json(filtered)
     } catch (error) {
       console.error('[videoApi] list works: failed', error)
@@ -175,16 +183,16 @@ export function createVideoApi({ worksFile, uploadsDir, maxFileBytes }) {
 
   router.post('/api/videos', upload.single('file'), async (req, res, next) => {
     try {
-      console.log('[videoApi] create media: start', {
-        hasFile: Boolean(req.file),
-        contentType: req.headers['content-type'],
-        contentLength: req.headers['content-length'],
-      })
       const { ownerId, title, description, externalUrl } = req.body
       if (!ownerId || !title) {
         console.warn('[videoApi] create media: missing_fields', {
           ownerId: Boolean(ownerId),
           title: Boolean(title),
+        })
+        audit?.(req, 'TASK_CREATED', {
+          actor: typeof ownerId === 'string' ? ownerId : null,
+          result: 'error',
+          meta: { error: 'missing_fields' },
         })
         return res.status(400).json({ error: 'missing_fields' })
       }
@@ -198,7 +206,19 @@ export function createVideoApi({ worksFile, uploadsDir, maxFileBytes }) {
         !normalizedExternalUrl.startsWith('https://')
       ) {
         console.warn('[videoApi] create media: invalid_url', { externalUrl: normalizedExternalUrl })
+        audit?.(req, 'TASK_CREATED', {
+          actor: ownerId,
+          result: 'error',
+          meta: { error: 'invalid_url' },
+        })
         return res.status(400).json({ error: 'invalid_url' })
+      }
+
+      const sourceHeader = req.headers['x-event-source'] ?? req.headers['x-task-source'] ?? null
+      const source = normalizeSource(req.body?.source ?? sourceHeader)
+      if ((req.body?.source != null || sourceHeader != null) && !source) {
+        audit?.(req, 'TASK_CREATED', { actor: ownerId, result: 'error', meta: { error: 'invalid_source' } })
+        return res.status(400).json({ error: 'invalid_source' })
       }
 
       let mediaUrl = normalizedExternalUrl
@@ -208,12 +228,6 @@ export function createVideoApi({ worksFile, uploadsDir, maxFileBytes }) {
 
       if (req.file) {
         storedFileName = req.file.filename
-        console.log('[videoApi] create media: file stored', {
-          originalname: req.file.originalname,
-          mimetype: req.file.mimetype,
-          size: req.file.size,
-          storedFileName,
-        })
         mediaUrl = `/videos/${storedFileName}`
       }
 
@@ -226,11 +240,6 @@ export function createVideoApi({ worksFile, uploadsDir, maxFileBytes }) {
 
       if (!mediaUrl) return res.status(400).json({ error: 'missing_video' })
 
-      console.log('[videoApi] create media: writing work record', {
-        ownerId,
-        titleLength: String(title).length,
-        descriptionLength: String(normalizedDescription).length,
-      })
       const works = await readWorks()
       const work = {
         id: cryptoRandomId(),
@@ -239,19 +248,37 @@ export function createVideoApi({ worksFile, uploadsDir, maxFileBytes }) {
         description: normalizedDescription.trim(),
         mediaUrl,
         mediaType,
+        source: source || null,
         mediaFileName: req.file?.originalname ?? null,
         mediaStorageName: storedFileName || null,
         videoUrl: mediaUrl,
         videoFileName: req.file?.originalname ?? null,
         videoStorageName: storedFileName || null,
         createdAt: new Date().toISOString(),
+        completedAt: null,
       }
       works.push(work)
       await writeWorks(works)
-      console.log('[videoApi] create media: ok', { id: work.id, ownerId: work.ownerId, mediaUrl: work.mediaUrl })
+      await logBusinessEvent({
+        req,
+        event: 'TASK_CREATED',
+        actor: work.ownerId,
+        target: work.id,
+        meta: {
+          title: work.title ?? null,
+          source: work.source ?? 'manual',
+          hasFile: Boolean(req.file),
+          mediaType: work.mediaType,
+        },
+      })
       res.status(201).json(work)
     } catch (error) {
       console.error('[videoApi] create media: failed', error)
+      audit?.(req, 'TASK_CREATED', {
+        actor: typeof req.body?.ownerId === 'string' ? req.body.ownerId : null,
+        result: 'error',
+        meta: { error: error instanceof Error ? error.message : String(error) },
+      })
       next(error)
     }
   })
@@ -267,8 +294,19 @@ export function createVideoApi({ worksFile, uploadsDir, maxFileBytes }) {
       if (storedName) {
         await fs.unlink(path.join(UPLOADS_DIR, storedName)).catch(() => {})
       }
+      await logBusinessEvent({
+        req,
+        event: 'TASK_DELETED',
+        actor: removed.ownerId,
+        target: removed.id,
+        meta: { title: removed.title ?? null, source: removed.source ?? 'manual' },
+      })
       res.status(204).end()
     } catch (error) {
+      audit?.(req, 'TASK_DELETED', {
+        result: 'error',
+        meta: { error: error instanceof Error ? error.message : String(error) },
+      })
       next(error)
     }
   })
@@ -288,8 +326,15 @@ export function createVideoApi({ worksFile, uploadsDir, maxFileBytes }) {
         typeof req.body?.description === 'string'
           ? req.body.description.trim()
           : undefined
+      const actionSource = getActionSource(req, prev.source)
 
       if (title !== undefined && !title) {
+        audit?.(req, 'TASK_UPDATED', {
+          actor: prev.ownerId,
+          target: prev.id,
+          result: 'error',
+          meta: { error: 'missing_title', source: actionSource },
+        })
         return res.status(400).json({ error: 'missing_title' })
       }
 
@@ -302,8 +347,65 @@ export function createVideoApi({ worksFile, uploadsDir, maxFileBytes }) {
       works[index] = nextWork
       await writeWorks(works)
 
+      audit?.(req, 'TASK_UPDATED', {
+        actor: prev.ownerId,
+        target: prev.id,
+        meta: {
+          source: actionSource,
+          changed: {
+            title: title !== undefined,
+            description: description !== undefined,
+          },
+        },
+      })
+      await logBusinessEvent({
+        req,
+        event: 'TASK_UPDATED',
+        actor: prev.ownerId,
+        target: prev.id,
+        meta: {
+          source: actionSource,
+          changed: { title: title !== undefined, description: description !== undefined },
+        },
+      })
       res.json(normalizeWorkRecord(nextWork))
     } catch (error) {
+      audit?.(req, 'TASK_UPDATED', {
+        result: 'error',
+        meta: { error: error instanceof Error ? error.message : String(error) },
+      })
+      next(error)
+    }
+  })
+
+  router.post('/api/videos/:id/complete', async (req, res, next) => {
+    try {
+      const works = await readWorks()
+      const index = works.findIndex((work) => work.id === req.params.id)
+      if (index === -1) return res.status(404).json({ error: 'not_found' })
+
+      const work = works[index]
+      const actionSource = getActionSource(req, work.source)
+      if (!work.completedAt) {
+        work.completedAt = new Date().toISOString()
+        works[index] = work
+        await writeWorks(works)
+      }
+
+      await logBusinessEvent({
+        req,
+        event: 'TASK_COMPLETED',
+        actor: work.ownerId,
+        target: work.id,
+        meta: { title: work.title ?? null, source: actionSource },
+      })
+
+      res.json(normalizeWorkRecord(work))
+    } catch (error) {
+      audit?.(req, 'TASK_COMPLETED', {
+        result: 'error',
+        meta: { error: error instanceof Error ? error.message : String(error) },
+      })
       next(error)
     }
   })
