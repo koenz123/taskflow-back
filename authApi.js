@@ -345,7 +345,7 @@ export function createAuthApi({ dataDir, appBaseUrl, audit = null, logEvent = nu
     }
   })
 
-  // Email/password auth that returns JWT (shared secret with TG flow).
+  // Email/password auth that creates a pending signup and sends a verification code.
   router.post('/api/auth/register-email', async (req, res, next) => {
     try {
       const role = String(req.body?.role || '').trim()
@@ -361,9 +361,6 @@ export function createAuthApi({ dataDir, appBaseUrl, audit = null, logEvent = nu
       if (!password) return res.status(400).json({ error: 'missing_password' })
       if (!isStrongEnoughPassword(password)) return res.status(400).json({ error: 'weak_password' })
 
-      const JWT_SECRET = process.env.JWT_SECRET
-      if (!JWT_SECRET) return res.status(500).json({ error: 'server_not_configured' })
-
       const conn = await connectMongo()
       if (!conn?.enabled || mongoose.connection.readyState !== 1) {
         return res.status(500).json({ error: 'mongo_not_available' })
@@ -376,26 +373,51 @@ export function createAuthApi({ dataDir, appBaseUrl, audit = null, logEvent = nu
       const existing = await users.findOne({ email }, { readPreference: 'primary' })
       if (existing) return res.status(409).json({ error: 'email_taken' })
 
-      const now = new Date()
       const passwordHash = await hashPassword(password)
-      const insertRes = await users.insertOne({
+
+      const verified = await readJson(VERIFIED_FILE, {})
+      if (verified[email]) return res.status(409).json({ error: 'email_taken' })
+
+      const pending = await readJson(PENDING_FILE, {})
+      if (pending[email]) return res.status(409).json({ error: 'email_pending' })
+
+      const token = newToken()
+      const createdAt = new Date().toISOString()
+      const code = generateVerificationCode()
+      const verification = buildVerificationData({ token, code, ttlMs: 10 * 60 * 1000 })
+
+      pending[email] = {
         role,
         fullName,
         phone,
         email,
-        emailVerified: true,
         passwordHash,
-        createdAt: now,
-        updatedAt: now,
-      })
-      const userDoc = await users.findOne({ _id: insertRes.insertedId }, { readPreference: 'primary' })
-      if (!userDoc) return res.status(500).json({ error: 'user_create_failed' })
+        createdAt,
+        verification: {
+          token,
+          codeHash: verification.codeHash,
+          expiresAt: verification.expiresAt,
+        },
+      }
+      await writeJson(PENDING_FILE, pending)
 
-      const token = jwt.sign({ sub: String(userDoc._id), email }, JWT_SECRET, { expiresIn: '30d' })
-      setAuthCookie(req, res, token)
+      const verifications = await readJson(VERIFICATIONS_FILE, {})
+      verifications[token] = { email, createdAt, usedAt: null, expiresAt: verification.expiresAt }
+      await writeJson(VERIFICATIONS_FILE, verifications)
 
-      audit?.(req, 'auth.register_email', { actor: { email, role }, meta: { method: 'email' } })
-      res.json({ token, user: toPublicUser(userDoc) })
+      const verifyUrl = logVerifyLink(email, token)
+      const emailLog = String(process.env.RESEND_LOG || '').trim() === '1'
+      if (emailLog) console.log('[email] sending code to:', email)
+      try {
+        const r = await sendVerificationEmail(email, { code, verifyUrl, ttlMinutes: 10 })
+        if (emailLog) console.log('[email] resend ok:', r)
+        if (!r?.delivered) console.warn('[email] resend not delivered:', r)
+      } catch (err) {
+        console.error('[email] resend error:', err)
+      }
+
+      audit?.(req, 'auth.register_email', { actor: { email, role }, meta: { method: 'email', verification: 'code' } })
+      res.json({ ok: true })
     } catch (e) {
       next(e)
     }
@@ -469,7 +491,10 @@ export function createAuthApi({ dataDir, appBaseUrl, audit = null, logEvent = nu
       await writeJson(VERIFICATIONS_FILE, verifications)
 
       const verifyUrl = logVerifyLink(email, token)
+      const emailLog = String(process.env.RESEND_LOG || '').trim() === '1'
+      if (emailLog) console.log('[authApi] sending verification email (register)', { email })
       const delivery = await sendVerificationEmail(email, { code, verifyUrl, ttlMinutes: 10 })
+      if (emailLog) console.log('[authApi] verification email result (register):', delivery)
       if (!delivery?.delivered) console.warn('[authApi] email not delivered, fallback to console', delivery)
       if (!delivery?.delivered) console.warn('[authApi] verification link:', verifyUrl)
 
@@ -519,7 +544,10 @@ export function createAuthApi({ dataDir, appBaseUrl, audit = null, logEvent = nu
       await writeJson(VERIFICATIONS_FILE, verifications)
 
       const verifyUrl = logVerifyLink(email, token)
+      const emailLog = String(process.env.RESEND_LOG || '').trim() === '1'
+      if (emailLog) console.log('[authApi] sending verification email (send-verification)', { email })
       const delivery = await sendVerificationEmail(email, { code, verifyUrl, ttlMinutes: 10 })
+      if (emailLog) console.log('[authApi] verification email result (send-verification):', delivery)
       if (!delivery?.delivered) console.warn('[authApi] email not delivered, fallback to console', delivery)
       if (!delivery?.delivered) console.warn('[authApi] verification link:', verifyUrl)
 

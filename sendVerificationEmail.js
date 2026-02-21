@@ -15,17 +15,20 @@ async function trySendViaResend({ to, subject, text, html }) {
   if (!resend) return { delivered: false, reason: 'resend_not_configured' }
 
   const from = String(process.env.RESEND_FROM || 'Nativki <noreply@nativki.ru>').trim()
+  const shouldLog = String(process.env.RESEND_LOG || '').trim() === '1'
 
   try {
-    await resend.emails.send({
+    const response = await resend.emails.send({
       from,
       to,
       subject,
       text,
       html,
     })
+    if (shouldLog) console.log('RESEND RESPONSE:', response)
     return { delivered: true, channel: 'resend' }
   } catch (err) {
+    console.error('RESEND ERROR:', err)
     const e = err instanceof Error ? err : new Error(String(err))
     return { delivered: false, reason: 'resend_send_failed', error: e.message }
   }
@@ -107,7 +110,6 @@ export function verifyCode({ token, code, expectedHash }) {
 
 export default async function sendVerificationEmail(email, { code, verifyUrl = null, ttlMinutes = 10 } = {}) {
   const safeCode = escapeHtml(code)
-  const safeVerifyUrl = verifyUrl ? escapeHtml(verifyUrl) : null
 
   const subject = 'Код подтверждения'
   const textLines = [
@@ -116,32 +118,57 @@ export default async function sendVerificationEmail(email, { code, verifyUrl = n
     '',
     `Код действует ${ttlMinutes} минут.`,
   ]
-  if (verifyUrl) {
-    textLines.push('', 'Если удобнее, можно подтвердить по ссылке:', String(verifyUrl))
-  }
   const text = textLines.join('\n')
 
-  const html = `
-    <div style="font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; line-height: 1.4;">
-      <h2 style="margin: 0 0 12px;">Ваш код подтверждения</h2>
-      <div style="font-size: 32px; font-weight: 800; letter-spacing: 6px; margin: 0 0 10px;">${safeCode}</div>
-      <div style="color: #555; margin: 0 0 14px;">Код действует ${ttlMinutes} минут.</div>
-      ${
-        safeVerifyUrl
-          ? `<div style="margin-top: 10px; color: #777; font-size: 13px;">
-               Если удобнее, можно подтвердить по ссылке:
-               <div><a href="${safeVerifyUrl}">${safeVerifyUrl}</a></div>
-             </div>`
-          : ''
-      }
+  const template = `
+<div style="background:#f6f7fb;padding:40px 20px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+
+  <div style="max-width:520px;margin:auto;background:white;border-radius:16px;padding:40px 32px;box-shadow:0 8px 24px rgba(0,0,0,0.05);text-align:center;">
+
+    <div style="font-size:22px;font-weight:700;margin-bottom:24px;color:#111;">
+      Nativki
     </div>
-  `
+
+    <h2 style="margin:0 0 12px;font-size:22px;color:#111;">
+      Подтвердите вашу почту
+    </h2>
+
+    <p style="margin:0 0 28px;color:#555;font-size:15px;">
+      Введите этот код в приложении
+    </p>
+
+    <div style="
+      font-size:36px;
+      letter-spacing:8px;
+      font-weight:700;
+      color:#111;
+      background:#f3f4f8;
+      padding:16px 24px;
+      border-radius:12px;
+      display:inline-block;
+      margin-bottom:24px;
+    ">
+      ${safeCode}
+    </div>
+
+    <p style="margin:0 0 24px;color:#888;font-size:13px;">
+      Код действует ${ttlMinutes} минут
+    </p>
+
+    <p style="margin:0;color:#aaa;font-size:12px;">
+      Если вы не регистрировались — просто проигнорируйте письмо
+    </p>
+
+  </div>
+
+</div>
+`
 
   // Prefer Resend if configured, else SMTP, else console.
-  const viaResend = await trySendViaResend({ to: email, subject, text, html })
+  const viaResend = await trySendViaResend({ to: email, subject, text, html: template })
   if (viaResend.delivered) return viaResend
 
-  const viaSmtp = await trySendViaSmtp({ to: email, subject, text, html })
+  const viaSmtp = await trySendViaSmtp({ to: email, subject, text, html: template })
   if (viaSmtp.delivered) return viaSmtp
 
   return { delivered: false, reason: 'not_configured', meta: { resend: viaResend, smtp: viaSmtp } }
