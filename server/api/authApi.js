@@ -5,14 +5,15 @@ import fsSync from 'node:fs'
 import { promises as fs } from 'node:fs'
 import express from 'express'
 import jwt from 'jsonwebtoken'
-import { logBusinessEvent } from './logBusinessEvent.js'
 import mongoose from 'mongoose'
-import { connectMongo } from './db.js'
+import { logBusinessEvent } from '../infra/logBusinessEvent.js'
+import { connectMongo } from '../infra/db.js'
 import sendVerificationEmail, {
   buildVerificationData,
   generateVerificationCode,
   verifyCode,
-} from './sendVerificationEmail.js'
+} from '../integrations/sendVerificationEmail.js'
+import { verifyGoogleToken } from '../integrations/googleVerify.js'
 
 let ensureUsersIndexesPromise = null
 async function ensureUsersIndexes(usersCollection) {
@@ -38,6 +39,7 @@ async function ensureUsersIndexes(usersCollection) {
       // ignore
     }
     await usersCollection.createIndex({ telegramUserId: 1 }, { unique: true, sparse: true })
+    await usersCollection.createIndex({ googleId: 1 }, { unique: true, sparse: true })
     // Best-effort: enforce unique email identities (email-based auth).
     // Sparse allows multiple docs without email field.
     await usersCollection.createIndex({ email: 1 }, { unique: true, sparse: true })
@@ -172,6 +174,16 @@ function setAuthCookie(req, res, token) {
   })
 }
 
+function clearAuthCookie(req, res) {
+  const isHttps = isHttpsReq(req)
+  res.clearCookie('tf_token', {
+    httpOnly: true,
+    secure: isHttps,
+    sameSite: isHttps ? 'none' : 'lax',
+    path: '/',
+  })
+}
+
 function toPublicUser(userDoc) {
   const telegramUserId =
     typeof userDoc?.telegramUserId === 'string' && userDoc.telegramUserId ? userDoc.telegramUserId : null
@@ -267,6 +279,7 @@ export function createAuthApi({ dataDir, appBaseUrl, audit = null, logEvent = nu
   const VERIFICATIONS_FILE = path.join(DATA_DIR, 'emailVerifications.json')
   const VERIFIED_FILE = path.join(DATA_DIR, 'verifiedEmails.json')
   const PENDING_FILE = path.join(DATA_DIR, 'pendingSignups.json')
+  const PASSWORD_RESETS_FILE = path.join(DATA_DIR, 'passwordResets.json')
 
   async function ensureStorage() {
     await fs.mkdir(DATA_DIR, { recursive: true })
@@ -281,6 +294,10 @@ export function createAuthApi({ dataDir, appBaseUrl, audit = null, logEvent = nu
     const ps = await readJson(PENDING_FILE, null)
     if (!ps || typeof ps !== 'object' || Array.isArray(ps)) {
       await writeJson(PENDING_FILE, {})
+    }
+    const pr = await readJson(PASSWORD_RESETS_FILE, null)
+    if (!pr || typeof pr !== 'object' || Array.isArray(pr)) {
+      await writeJson(PASSWORD_RESETS_FILE, {})
     }
   }
 
@@ -299,6 +316,18 @@ export function createAuthApi({ dataDir, appBaseUrl, audit = null, logEvent = nu
   })
 
   router.use(express.json({ limit: '1mb' }))
+
+  function inferLocale(req) {
+    const h = String(req.headers?.['accept-language'] || '').toLowerCase()
+    if (h.includes('ru')) return 'ru'
+    if (h.includes('en')) return 'en'
+    return 'ru'
+  }
+
+  router.post('/api/auth/logout', async (req, res) => {
+    clearAuthCookie(req, res)
+    res.json({ ok: true })
+  })
 
   router.post('/api/auth/login', async (req, res, next) => {
     try {
@@ -342,6 +371,120 @@ export function createAuthApi({ dataDir, appBaseUrl, audit = null, logEvent = nu
       res.json({ token, user: toPublicUser(userDoc) })
     } catch (e) {
       next(e)
+    }
+  })
+
+  // Forgot password: send a 6-digit code to email (best-effort, no user enumeration).
+  router.post('/api/auth/forgot-password', async (req, res) => {
+    try {
+      const email = normalizeEmail(req.body?.email)
+      if (!email || !isValidEmail(email)) return res.status(400).json({ error: 'invalid_email' })
+
+      const conn = await connectMongo()
+      if (!conn?.enabled || mongoose.connection.readyState !== 1) {
+        // Do not leak infra errors to user; frontend can retry.
+        return res.json({ ok: true })
+      }
+      const db = mongoose.connection.db
+      if (!db) return res.json({ ok: true })
+      const users = db.collection('users')
+      await ensureUsersIndexes(users)
+
+      const userDoc = await users.findOne({ email }, { readPreference: 'primary' })
+      const hasPassword = typeof userDoc?.passwordHash === 'string' && userDoc.passwordHash
+      if (!userDoc || !hasPassword) {
+        audit?.(req, 'auth.forgot_password', { actor: { email }, meta: { sent: false, reason: 'no_user_or_password' } })
+        return res.json({ ok: true })
+      }
+
+      const code = generateVerificationCode()
+      const token = newToken()
+      const verification = buildVerificationData({ token, code, ttlMs: 10 * 60 * 1000 })
+      const nowIso = new Date().toISOString()
+
+      const resets = await readJson(PASSWORD_RESETS_FILE, {})
+      resets[email] = {
+        token,
+        codeHash: verification.codeHash,
+        createdAt: nowIso,
+        expiresAt: verification.expiresAt,
+        usedAt: null,
+      }
+      await writeJson(PASSWORD_RESETS_FILE, resets)
+
+      const emailLog = String(process.env.RESEND_LOG || '').trim() === '1'
+      if (emailLog) console.log('[authApi] sending password reset code:', { email })
+      const delivery = await sendVerificationEmail(email, { code, ttlMinutes: 10, kind: 'reset_password', locale: inferLocale(req) })
+      if (emailLog) console.log('[authApi] password reset email result:', delivery)
+      if (!delivery?.delivered) console.warn('[authApi] password reset email not delivered', delivery)
+
+      audit?.(req, 'auth.forgot_password', {
+        actor: { email },
+        meta: { sent: Boolean(delivery?.delivered), delivery: delivery?.delivered ? delivery.channel : 'none' },
+      })
+
+      return res.json({ ok: true })
+    } catch (e) {
+      console.error('[authApi] forgot-password failed', e)
+      return res.json({ ok: true })
+    }
+  })
+
+  // Reset password by code.
+  router.post('/api/auth/reset-password', async (req, res) => {
+    try {
+      const email = normalizeEmail(req.body?.email)
+      const code = String(req.body?.code || '').trim()
+      const newPassword = typeof req.body?.newPassword === 'string' ? req.body.newPassword : ''
+
+      if (!email || !isValidEmail(email)) return res.status(400).json({ error: 'invalid_email' })
+      if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: 'invalid_code' })
+      if (!newPassword) return res.status(400).json({ error: 'missing_password' })
+      if (!isStrongEnoughPassword(newPassword)) return res.status(400).json({ error: 'weak_password' })
+
+      const resets = await readJson(PASSWORD_RESETS_FILE, {})
+      const r = resets[email] ?? null
+      if (!r || typeof r?.token !== 'string' || typeof r?.codeHash !== 'string') {
+        return res.status(400).json({ error: 'invalid_code' })
+      }
+      if (r.usedAt) return res.status(400).json({ error: 'code_used' })
+      const expMs = Date.parse(String(r.expiresAt || ''))
+      if (Number.isFinite(expMs) && Date.now() > expMs) return res.status(400).json({ error: 'code_expired' })
+
+      const ok = verifyCode({ token: r.token, code, expectedHash: r.codeHash })
+      if (!ok) return res.status(400).json({ error: 'invalid_code' })
+
+      const JWT_SECRET = process.env.JWT_SECRET
+      if (!JWT_SECRET) return res.status(500).json({ error: 'server_not_configured' })
+
+      const conn = await connectMongo()
+      if (!conn?.enabled || mongoose.connection.readyState !== 1) {
+        return res.status(500).json({ error: 'mongo_not_available' })
+      }
+      const db = mongoose.connection.db
+      if (!db) return res.status(500).json({ error: 'mongo_db_missing' })
+      const users = db.collection('users')
+      await ensureUsersIndexes(users)
+
+      const userDoc = await users.findOne({ email }, { readPreference: 'primary' })
+      if (!userDoc?._id) return res.status(404).json({ error: 'user_not_found' })
+
+      const passwordHash = await hashPassword(newPassword)
+      const now = new Date()
+      await users.updateOne({ _id: userDoc._id }, { $set: { passwordHash, updatedAt: now } })
+
+      // Invalidate reset record (best-effort).
+      resets[email] = { ...r, usedAt: now.toISOString() }
+      await writeJson(PASSWORD_RESETS_FILE, resets)
+
+      const token = jwt.sign({ sub: String(userDoc._id), email }, JWT_SECRET, { expiresIn: '30d' })
+      setAuthCookie(req, res, token)
+
+      audit?.(req, 'auth.reset_password', { actor: { email }, meta: { ok: true } })
+      return res.json({ ok: true, token, user: toPublicUser({ ...userDoc, passwordHash }) })
+    } catch (e) {
+      console.error('[authApi] reset-password failed', e)
+      return res.status(500).json({ error: 'server_error' })
     }
   })
 
@@ -409,7 +552,7 @@ export function createAuthApi({ dataDir, appBaseUrl, audit = null, logEvent = nu
       const emailLog = String(process.env.RESEND_LOG || '').trim() === '1'
       if (emailLog) console.log('[email] sending code to:', email)
       try {
-        const r = await sendVerificationEmail(email, { code, verifyUrl, ttlMinutes: 10 })
+        const r = await sendVerificationEmail(email, { code, verifyUrl, ttlMinutes: 10, kind: 'register', locale: inferLocale(req) })
         if (emailLog) console.log('[email] resend ok:', r)
         if (!r?.delivered) console.warn('[email] resend not delivered:', r)
       } catch (err) {
@@ -493,7 +636,7 @@ export function createAuthApi({ dataDir, appBaseUrl, audit = null, logEvent = nu
       const verifyUrl = logVerifyLink(email, token)
       const emailLog = String(process.env.RESEND_LOG || '').trim() === '1'
       if (emailLog) console.log('[authApi] sending verification email (register)', { email })
-      const delivery = await sendVerificationEmail(email, { code, verifyUrl, ttlMinutes: 10 })
+      const delivery = await sendVerificationEmail(email, { code, verifyUrl, ttlMinutes: 10, kind: 'register', locale: inferLocale(req) })
       if (emailLog) console.log('[authApi] verification email result (register):', delivery)
       if (!delivery?.delivered) console.warn('[authApi] email not delivered, fallback to console', delivery)
       if (!delivery?.delivered) console.warn('[authApi] verification link:', verifyUrl)
@@ -546,7 +689,7 @@ export function createAuthApi({ dataDir, appBaseUrl, audit = null, logEvent = nu
       const verifyUrl = logVerifyLink(email, token)
       const emailLog = String(process.env.RESEND_LOG || '').trim() === '1'
       if (emailLog) console.log('[authApi] sending verification email (send-verification)', { email })
-      const delivery = await sendVerificationEmail(email, { code, verifyUrl, ttlMinutes: 10 })
+      const delivery = await sendVerificationEmail(email, { code, verifyUrl, ttlMinutes: 10, kind: 'register', locale: inferLocale(req) })
       if (emailLog) console.log('[authApi] verification email result (send-verification):', delivery)
       if (!delivery?.delivered) console.warn('[authApi] email not delivered, fallback to console', delivery)
       if (!delivery?.delivered) console.warn('[authApi] verification link:', verifyUrl)
@@ -696,6 +839,94 @@ export function createAuthApi({ dataDir, appBaseUrl, audit = null, logEvent = nu
       return res.json({ token, user })
     } catch (e) {
       next(e)
+    }
+  })
+
+  router.post('/api/auth/google', async (req, res, next) => {
+    try {
+      const idToken = String(req.body?.idToken || '').trim()
+      if (!idToken) return res.status(400).json({ error: 'missing_idToken' })
+
+      const payload = await verifyGoogleToken(idToken)
+      const googleId = typeof payload?.sub === 'string' ? payload.sub : ''
+      const email = normalizeEmail(payload?.email)
+      const emailVerified = Boolean(payload?.email_verified)
+      const fullName = typeof payload?.name === 'string' ? payload.name.trim() : ''
+      const photoUrl = typeof payload?.picture === 'string' ? payload.picture.trim() : ''
+
+      if (!googleId) return res.status(401).json({ error: 'google_invalid_token' })
+      if (!email || !isValidEmail(email)) return res.status(400).json({ error: 'invalid_email' })
+      if (!emailVerified) return res.status(400).json({ error: 'email_not_verified' })
+
+      const JWT_SECRET = process.env.JWT_SECRET
+      if (!JWT_SECRET) return res.status(500).json({ error: 'server_not_configured' })
+
+      const conn = await connectMongo()
+      if (!conn?.enabled || mongoose.connection.readyState !== 1) {
+        return res.status(500).json({ error: 'mongo_not_available' })
+      }
+      const db = mongoose.connection.db
+      if (!db) return res.status(500).json({ error: 'mongo_db_missing' })
+      const users = db.collection('users')
+      await ensureUsersIndexes(users)
+
+      let userDoc = await users.findOne({ googleId }, { readPreference: 'primary' })
+      if (!userDoc && email) {
+        userDoc = await users.findOne({ email }, { readPreference: 'primary' })
+        if (userDoc?._id) {
+          await users.updateOne(
+            { _id: userDoc._id },
+            {
+              $set: {
+                googleId,
+                email,
+                emailVerified: true,
+                ...(fullName ? { fullName } : null),
+                ...(photoUrl ? { photoUrl } : null),
+                updatedAt: new Date(),
+              },
+            },
+          )
+          userDoc = await users.findOne({ _id: userDoc._id }, { readPreference: 'primary' })
+        }
+      }
+
+      if (!userDoc) {
+        const now = new Date()
+        const insertRes = await users.insertOne({
+          googleId,
+          email,
+          emailVerified: true,
+          role: 'pending',
+          fullName: fullName || email,
+          phone: '',
+          photoUrl: photoUrl || null,
+          createdAt: now,
+          updatedAt: now,
+        })
+        userDoc = await users.findOne({ _id: insertRes.insertedId }, { readPreference: 'primary' })
+      }
+
+      if (!userDoc?._id) return res.status(500).json({ error: 'user_create_failed' })
+
+      const token = jwt.sign({ sub: String(userDoc._id), email }, JWT_SECRET, { expiresIn: '30d' })
+      setAuthCookie(req, res, token)
+
+      const sourceHeader = req.headers['x-event-source'] ?? null
+      const source = typeof sourceHeader === 'string' && sourceHeader.trim() ? sourceHeader.trim() : 'app'
+      await logBusinessEvent({
+        req,
+        event: 'USER_LOGIN',
+        actor: String(userDoc._id),
+        target: null,
+        meta: { method: 'google', source },
+      }).catch(() => {})
+
+      audit?.(req, 'auth.google_login', { actor: { email }, meta: { method: 'google' } })
+      res.json({ token, user: toPublicUser(userDoc) })
+    } catch (e) {
+      console.error('[authApi] google login failed', e)
+      res.status(401).json({ error: 'google_auth_failed' })
     }
   })
 

@@ -22,7 +22,7 @@ function guessMediaType(mimeType) {
   return 'file'
 }
 
-export function createUploadsApi({ uploadsDir, maxFileBytes = 2 * 1024 * 1024 * 1024 } = {}) {
+export function createUploadsApi({ uploadsDir, maxFileBytes = 5 * 1024 * 1024 * 1024 } = {}) {
   const router = express.Router()
 
   const UPLOADS_DIR = uploadsDir

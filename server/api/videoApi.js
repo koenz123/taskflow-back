@@ -2,7 +2,7 @@ import path from 'node:path'
 import { promises as fs } from 'node:fs'
 import express from 'express'
 import multer from 'multer'
-import { logBusinessEvent } from './logBusinessEvent.js'
+import { logBusinessEvent } from '../infra/logBusinessEvent.js'
 
 export function createVideoApi({ worksFile, uploadsDir, maxFileBytes, audit = null, logEvent = null }) {
   const router = express.Router()

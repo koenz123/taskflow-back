@@ -1,6 +1,7 @@
 import mongoose from 'mongoose'
-import { refundEscrowToCustomer } from './escrowService.js'
-import { applySanctionsForViolation } from './executorSanctionsService.js'
+import { refundEscrowToCustomer } from '../services/escrowService.js'
+import { applySanctionsForViolation } from '../services/executorSanctionsService.js'
+import { createNotification } from '../services/notificationService.js'
 
 function safeIso(v) {
   const s = typeof v === 'string' ? v.trim() : ''
@@ -79,8 +80,7 @@ async function recomputeTaskStatus({ db, taskId }) {
 async function notify(db, userMongoId, text, meta = null) {
   if (!userMongoId || !text) return null
   try {
-    const col = db.collection('notifications')
-    await col.insertOne({ userId: String(userMongoId), text: String(text), meta: meta && typeof meta === 'object' ? meta : null, createdAt: new Date() })
+    await createNotification({ db, userId: String(userMongoId), text: String(text), meta })
     return true
   } catch {
     return null

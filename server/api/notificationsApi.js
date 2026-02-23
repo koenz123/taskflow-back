@@ -1,8 +1,8 @@
 import express from 'express'
 import mongoose from 'mongoose'
-import { requireAuth } from './auth.js'
-import { sendTelegramNotification } from './telegramBot.js'
-import { tryResolveAuthUser } from './authSession.js'
+import { requireAuth } from '../auth/auth.js'
+import { tryResolveAuthUser } from '../auth/authSession.js'
+import { createNotification } from '../services/notificationService.js'
 
 function isObject(v) {
   return v !== null && typeof v === 'object' && !Array.isArray(v)
@@ -182,28 +182,10 @@ export function createNotificationsApi({ dataDir }) {
     const db = mongoose.connection.db
     if (!db) return res.status(500).json({ error: 'mongo_not_available' })
 
+    const created = await createNotification({ db, dataDir, userId: String(userId), text, meta })
     const col = db.collection('notifications')
-    const now = new Date()
-    const insertRes = await col.insertOne({
-      userId: String(userId),
-      text,
-      meta,
-      createdAt: now,
-    })
-
-    // If frontend supplies telegramUserId (or if we can infer later), send message.
-    const telegramUserId = typeof req.body?.telegramUserId === 'string' ? req.body.telegramUserId.trim() : ''
-    let telegram = null
-    if (telegramUserId) {
-      try {
-        telegram = await sendTelegramNotification({ dataDir, text, telegramUserId })
-      } catch (e) {
-        telegram = { ok: false, error: 'send_failed' }
-      }
-    }
-
-    const doc = await col.findOne({ _id: insertRes.insertedId })
-    res.status(201).json({ ok: true, notification: toNotificationDto(doc), telegram })
+    const doc = await col.findOne({ _id: new mongoose.Types.ObjectId(created.id) })
+    res.status(201).json({ ok: true, notification: toNotificationDto(doc), telegram: created.telegram })
   })
 
   return router

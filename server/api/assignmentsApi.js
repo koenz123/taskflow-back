@@ -1,6 +1,7 @@
 import express from 'express'
 import mongoose from 'mongoose'
-import { tryResolveAuthUser } from './authSession.js'
+import { tryResolveAuthUser } from '../auth/authSession.js'
+import { createNotification } from '../services/notificationService.js'
 
 const START_WINDOW_MS = 12 * 60 * 60 * 1000
 const EXECUTION_WINDOW_MS = 24 * 60 * 60 * 1000
@@ -34,12 +35,7 @@ async function addNotification(db, userMongoId, text, meta = null) {
     if (!userMongoId) return
     const msg = String(text || '').trim()
     if (!msg) return
-    await db.collection('notifications').insertOne({
-      userId: String(userMongoId),
-      text: msg,
-      meta: meta && typeof meta === 'object' ? meta : null,
-      createdAt: new Date(),
-    })
+    await createNotification({ db, userId: String(userMongoId), text: msg, meta })
   } catch {
     // ignore (best-effort)
   }
@@ -786,6 +782,82 @@ export function createAssignmentsApi() {
     } catch {
       // ignore
     }
+    return res.json(toDto(doc))
+  }))
+
+  // Resume (unpause) a paused assignment.
+  // Frontend expects: PATCH /api/assignments/:id/resume_pause
+  router.patch('/api/assignments/:assignmentId/resume_pause', asyncHandler(async (req, res) => {
+    const r = await tryResolveAuthUser(req)
+    if (!r.ok) return res.status(401).json({ error: r.error })
+    const role = typeof r.user?.role === 'string' && r.user.role ? r.user.role : 'pending'
+    const { userMongoId, userPublicId } = getAuthIds(r)
+
+    let oid = null
+    try {
+      oid = new mongoose.Types.ObjectId(String(req.params.assignmentId))
+    } catch {
+      oid = null
+    }
+    if (!oid) return res.status(400).json({ error: 'bad_assignment_id' })
+
+    const db = mongoose.connection.db
+    if (!db) return res.status(500).json({ error: 'mongo_not_available' })
+    const assignments = db.collection('assignments')
+    const tasks = db.collection('tasks')
+
+    const a = await assignments.findOne({ _id: oid }, { readPreference: 'primary' })
+    if (!a) return res.status(404).json({ error: 'not_found' })
+
+    const isExecutor = a.executorId === userPublicId || a.executorId === userMongoId
+    let isOwner = false
+    if (!isExecutor && role === 'customer') {
+      const taskId = typeof a.taskId === 'string' ? a.taskId : ''
+      if (taskId) {
+        let tOid = null
+        try {
+          tOid = new mongoose.Types.ObjectId(taskId)
+        } catch {
+          tOid = null
+        }
+        if (tOid) {
+          const task = await tasks.findOne({ _id: tOid }, { readPreference: 'primary' })
+          isOwner =
+            task?.createdByMongoId === userMongoId ||
+            task?.createdByUserId === userPublicId ||
+            task?.userId === userMongoId ||
+            task?.userId === userPublicId
+        }
+      }
+    }
+
+    if (!isExecutor && !isOwner) return res.status(403).json({ error: 'forbidden' })
+
+    if (a.status !== 'paused') return res.json(toDto(a))
+
+    const now = new Date()
+    const update = await assignments.findOneAndUpdate(
+      { _id: oid },
+      {
+        $set: {
+          status: 'in_progress',
+          updatedAt: now,
+          // Clear pause fields (keep pauseUsed=true so user can't request again).
+          pauseRequestedAt: null,
+          pauseAutoAcceptAt: null,
+          pauseReasonId: null,
+          pauseComment: null,
+          pauseRequestedDurationMs: null,
+          pauseDecision: null,
+          pauseDecidedAt: null,
+          pausedAt: null,
+          pausedUntil: null,
+        },
+      },
+      { returnDocument: 'after' },
+    )
+    const doc = update?.value ?? update
+    if (doc?.taskId) await recomputeTaskStatus({ db, taskId: doc.taskId }).catch(() => {})
     return res.json(toDto(doc))
   }))
 

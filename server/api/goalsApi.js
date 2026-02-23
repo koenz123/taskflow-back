@@ -1,8 +1,8 @@
 import path from 'node:path'
 import { promises as fs } from 'node:fs'
 import express from 'express'
-import { requireAuth } from './auth.js'
-import { logBusinessEvent } from './logBusinessEvent.js'
+import { requireAuth } from '../auth/auth.js'
+import { logBusinessEvent } from '../infra/logBusinessEvent.js'
 
 async function readJson(filePath, fallback) {
   try {

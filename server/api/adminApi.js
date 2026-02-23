@@ -2,7 +2,7 @@ import express from 'express'
 import path from 'node:path'
 import { promises as fs } from 'node:fs'
 import mongoose from 'mongoose'
-import { connectMongo } from './db.js'
+import { connectMongo } from '../infra/db.js'
 
 async function readJson(filePath, fallback) {
   try {

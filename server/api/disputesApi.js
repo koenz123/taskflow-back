@@ -1,7 +1,8 @@
 import express from 'express'
 import mongoose from 'mongoose'
-import { tryResolveAuthUser } from './authSession.js'
-import { refundEscrowToCustomer, releaseEscrowToExecutor, splitEscrow } from './escrowService.js'
+import { tryResolveAuthUser } from '../auth/authSession.js'
+import { refundEscrowToCustomer, releaseEscrowToExecutor, splitEscrow } from '../services/escrowService.js'
+import { createNotification } from '../services/notificationService.js'
 
 const SLA_MS = 24 * 60 * 60 * 1000
 
@@ -26,12 +27,7 @@ async function addNotification(db, userMongoId, text, meta = null) {
     if (!userMongoId) return
     const msg = String(text || '').trim()
     if (!msg) return
-    await db.collection('notifications').insertOne({
-      userId: String(userMongoId),
-      text: msg,
-      meta: meta && typeof meta === 'object' ? meta : null,
-      createdAt: new Date(),
-    })
+    await createNotification({ db, userId: String(userMongoId), text: msg, meta })
   } catch {
     // ignore (best-effort)
   }

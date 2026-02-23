@@ -1,6 +1,7 @@
 import express from 'express'
 import mongoose from 'mongoose'
-import { tryResolveAuthUser } from './authSession.js'
+import { tryResolveAuthUser } from '../auth/authSession.js'
+import { createNotification } from '../services/notificationService.js'
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
@@ -15,12 +16,7 @@ async function addNotification(db, userMongoId, text, meta = null) {
     if (!userMongoId) return
     const msg = String(text || '').trim()
     if (!msg) return
-    await db.collection('notifications').insertOne({
-      userId: String(userMongoId),
-      text: msg,
-      meta: meta && typeof meta === 'object' ? meta : null,
-      createdAt: new Date(),
-    })
+    await createNotification({ db, userId: String(userMongoId), text: msg, meta })
   } catch {
     // ignore (best-effort)
   }
@@ -55,11 +51,22 @@ function normalizeFiles(value) {
   return value
     .map((x) => {
       if (!isObject(x)) return null
-      const kind = x.kind
-      const url = typeof x.url === 'string' ? x.url.trim() : ''
+      const kindRaw = typeof x.kind === 'string' ? x.kind.trim() : ''
+      const kind = kindRaw || 'upload'
+      const url =
+        typeof x.url === 'string'
+          ? x.url.trim()
+          : typeof x.path === 'string'
+            ? x.path.trim()
+            : typeof x.fileUrl === 'string'
+              ? x.fileUrl.trim()
+              : typeof x.mediaUrl === 'string'
+                ? x.mediaUrl.trim()
+                : ''
       if (!url) return null
       const title = typeof x.title === 'string' && x.title.trim() ? x.title.trim() : undefined
-      const mediaType = x.mediaType === 'video' || x.mediaType === 'image' || x.mediaType === 'file' ? x.mediaType : undefined
+      const mediaType =
+        x.mediaType === 'video' || x.mediaType === 'image' || x.mediaType === 'file' ? x.mediaType : undefined
       if (kind === 'external_url') return { kind: 'external_url', url, title, mediaType }
       if (kind === 'upload') {
         const workId = typeof x.workId === 'string' && x.workId.trim() ? x.workId.trim() : undefined
@@ -70,12 +77,21 @@ function normalizeFiles(value) {
     .filter(Boolean)
 }
 
+function pickCompletionVideoUrl(files) {
+  if (!Array.isArray(files) || files.length === 0) return undefined
+  const firstVideo = files.find((f) => f && typeof f === 'object' && f.mediaType === 'video' && typeof f.url === 'string' && f.url.trim())
+  if (firstVideo) return firstVideo.url.trim()
+  const firstAny = files.find((f) => f && typeof f === 'object' && typeof f.url === 'string' && f.url.trim())
+  return firstAny ? firstAny.url.trim() : undefined
+}
+
 function toDto(doc) {
   if (!doc) return null
   const { _id, createdAt, ...rest } = doc
   return {
     id: String(_id),
     createdAt: createdAt ? new Date(createdAt).toISOString() : null,
+    completionVideoUrl: pickCompletionVideoUrl(doc.files),
     ...rest,
   }
 }

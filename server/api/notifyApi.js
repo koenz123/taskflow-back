@@ -1,5 +1,5 @@
 import express from 'express'
-import { sendTelegramNotification } from './telegramBot.js'
+import { sendTelegramNotification } from '../integrations/telegramBot.js'
 
 export function createNotifyApi({ dataDir }) {
   const router = express.Router()

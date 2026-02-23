@@ -1,5 +1,5 @@
 import { connectMongo, isMongoEnabled } from './db.js'
-import { Event } from './models/Event.js'
+import { Event } from '../../models/Event.js'
 
 const ALLOWED_TYPES = new Set([
   // Цели

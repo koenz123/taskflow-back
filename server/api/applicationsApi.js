@@ -1,8 +1,9 @@
 import express from 'express'
 import mongoose from 'mongoose'
-import { tryResolveAuthUser } from './authSession.js'
-import { freezeEscrow } from './escrowService.js'
-import { canExecutorRespond } from './executorSanctionsService.js'
+import { tryResolveAuthUser } from '../auth/authSession.js'
+import { freezeEscrow } from '../services/escrowService.js'
+import { canExecutorRespond } from '../services/executorSanctionsService.js'
+import { createNotification } from '../services/notificationService.js'
 
 const START_WINDOW_MS = 12 * 60 * 60 * 1000
 
@@ -38,12 +39,7 @@ async function addNotification(db, userMongoId, text, meta = null) {
     if (!userMongoId) return
     const msg = String(text || '').trim()
     if (!msg) return
-    await db.collection('notifications').insertOne({
-      userId: String(userMongoId),
-      text: msg,
-      meta: meta && typeof meta === 'object' ? meta : null,
-      createdAt: new Date(),
-    })
+    await createNotification({ db, userId: String(userMongoId), text: msg, meta })
   } catch {
     // ignore (best-effort)
   }

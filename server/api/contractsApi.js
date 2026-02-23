@@ -1,7 +1,8 @@
 import express from 'express'
 import mongoose from 'mongoose'
-import { tryResolveAuthUser } from './authSession.js'
-import { releaseEscrowToExecutor } from './escrowService.js'
+import { tryResolveAuthUser } from '../auth/authSession.js'
+import { releaseEscrowToExecutor } from '../services/escrowService.js'
+import { createNotification } from '../services/notificationService.js'
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
@@ -20,12 +21,7 @@ async function addNotification(db, userMongoId, text, meta = null) {
     if (!userMongoId) return
     const msg = String(text || '').trim()
     if (!msg) return
-    await db.collection('notifications').insertOne({
-      userId: String(userMongoId),
-      text: msg,
-      meta: meta && typeof meta === 'object' ? meta : null,
-      createdAt: new Date(),
-    })
+    await createNotification({ db, userId: String(userMongoId), text: msg, meta })
   } catch {
     // ignore (best-effort)
   }

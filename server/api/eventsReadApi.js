@@ -1,7 +1,7 @@
 import express from 'express'
-import { requireAuth } from './auth.js'
-import { connectMongo, isMongoEnabled } from './db.js'
-import { Event } from './models/Event.js'
+import { requireAuth } from '../auth/auth.js'
+import { connectMongo, isMongoEnabled } from '../infra/db.js'
+import { Event } from '../../models/Event.js'
 
 function parseDate(value) {
   if (!value) return null

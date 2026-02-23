@@ -1,6 +1,6 @@
 import express from 'express'
-import { requireAuth } from './auth.js'
-import { logBusinessEvent } from './logBusinessEvent.js'
+import { requireAuth } from '../auth/auth.js'
+import { logBusinessEvent } from '../infra/logBusinessEvent.js'
 
 function normalizeSource(value) {
   if (value == null) return null

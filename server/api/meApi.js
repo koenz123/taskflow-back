@@ -1,8 +1,8 @@
 import express from 'express'
-import { tryResolveAuthUser } from './authSession.js'
-import { requireAuth } from './auth.js'
+import { tryResolveAuthUser } from '../auth/authSession.js'
+import { requireAuth } from '../auth/auth.js'
 import mongoose from 'mongoose'
-import { canExecutorRespond, ensureSanctionsIndexes, violationLevelForExecutor } from './executorSanctionsService.js'
+import { canExecutorRespond, ensureSanctionsIndexes, violationLevelForExecutor } from '../services/executorSanctionsService.js'
 
 export function createMeApi() {
   const router = express.Router()

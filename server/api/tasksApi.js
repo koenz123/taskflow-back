@@ -1,8 +1,8 @@
 import express from 'express'
 import mongoose from 'mongoose'
-import { tryResolveAuthUser } from './authSession.js'
-import { freezeEscrow } from './escrowService.js'
-import { canExecutorRespond } from './executorSanctionsService.js'
+import { tryResolveAuthUser } from '../auth/authSession.js'
+import { freezeEscrow } from '../services/escrowService.js'
+import { canExecutorRespond } from '../services/executorSanctionsService.js'
 
 function isObject(v) {
   return v !== null && typeof v === 'object' && !Array.isArray(v)

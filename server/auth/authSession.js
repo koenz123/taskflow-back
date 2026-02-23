@@ -1,6 +1,6 @@
 import jwt from 'jsonwebtoken'
 import mongoose from 'mongoose'
-import { connectMongo } from './db.js'
+import { connectMongo } from '../infra/db.js'
 
 function getBearerToken(req) {
   const h = req.headers?.authorization

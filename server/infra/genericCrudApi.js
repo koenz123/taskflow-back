@@ -1,7 +1,7 @@
 import express from 'express'
 import mongoose from 'mongoose'
-import { requireAuth } from './auth.js'
-import { tryResolveAuthUser } from './authSession.js'
+import { requireAuth } from '../auth/auth.js'
+import { tryResolveAuthUser } from '../auth/authSession.js'
 
 function safeTrim(v) {
   if (v == null) return null
