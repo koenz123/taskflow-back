@@ -4,6 +4,7 @@ import express from 'express'
 import cors from 'cors'
 import { createVideoApi } from './api/videoApi.js'
 import { createAuthApi } from './api/authApi.js'
+import { createConnectApi } from './api/connectApi.js'
 import { attachRequestId, createAuditor } from './infra/audit.js'
 import { connectMongo } from './infra/db.js'
 import { logEvent } from './infra/logEvent.js'
@@ -163,6 +164,7 @@ app.use(
     logEvent,
   }),
 )
+app.use(createConnectApi())
 
 app.use(
   createAdminApi({

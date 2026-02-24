@@ -21,6 +21,10 @@ export function createMeApi() {
       [userDoc.firstName, userDoc.lastName].filter(Boolean).join(' ').trim() ||
       userDoc.username ||
       publicId
+    const socials =
+      userDoc.socials && typeof userDoc.socials === 'object' && !Array.isArray(userDoc.socials)
+        ? userDoc.socials
+        : {}
 
     res.json({
       id: publicId,
@@ -31,6 +35,7 @@ export function createMeApi() {
       phone: typeof userDoc.phone === 'string' ? userDoc.phone : '',
       username: userDoc.username ?? null,
       photoUrl: userDoc.photoUrl ?? null,
+      socials,
       mongoId: String(userDoc._id),
       createdAt: userDoc.createdAt ?? null,
       updatedAt: userDoc.updatedAt ?? null,
