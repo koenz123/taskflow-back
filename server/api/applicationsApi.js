@@ -4,6 +4,9 @@ import { tryResolveAuthUser } from '../auth/authSession.js'
 import { freezeEscrow } from '../services/escrowService.js'
 import { canExecutorRespond } from '../services/executorSanctionsService.js'
 import { createNotification } from '../services/notificationService.js'
+import { inferLocale } from '../infra/locale.js'
+import { currencyFromLocale, fromRub, normalizeCurrency, round2, toRub } from '../infra/money.js'
+import { getUsdRubRate } from '../infra/usdRubRate.js'
 
 const START_WINDOW_MS = 12 * 60 * 60 * 1000
 
@@ -317,6 +320,14 @@ export function createApplicationsApi() {
       typeof task.budgetAmount === 'number' && Number.isFinite(task.budgetAmount) && task.budgetAmount >= 0
         ? task.budgetAmount
         : 0
+    const budgetCurrency = normalizeCurrency(task.budgetCurrency) ?? 'RUB'
+    const locale = inferLocale(req)
+    const requestCurrency = currencyFromLocale(locale)
+    const usdRubRate = budgetCurrency === 'USD' || requestCurrency === 'USD'
+      ? await getUsdRubRate({ dataDir: req.app?.locals?.dataDir })
+      : null
+    const amountRubStored = typeof task.budgetAmountRub === 'number' && Number.isFinite(task.budgetAmountRub) ? task.budgetAmountRub : null
+    const amountRub = amountRubStored ?? (budgetCurrency === 'USD' ? toRub(amount, 'USD', usdRubRate) : round2(amount))
     const fr = await freezeEscrow({
       db,
       balanceRepo: req.app?.locals?.balanceRepo,
@@ -326,10 +337,22 @@ export function createApplicationsApi() {
       customerMongoId: userMongoId,
       executorId,
       executorMongoId: executorMongoId,
-      amount,
+      amount: amountRub,
     })
     if (!fr.ok) {
-      if (fr.error === 'insufficient_balance') return res.status(409).json({ error: 'insufficient_balance', required: fr.required, balance: fr.balance })
+      if (fr.error === 'insufficient_balance') {
+        const required = requestCurrency === 'USD' ? fromRub(fr.required, 'USD', usdRubRate) : round2(fr.required)
+        const balance = requestCurrency === 'USD' ? fromRub(fr.balance, 'USD', usdRubRate) : round2(fr.balance)
+        return res.status(409).json({
+          error: 'insufficient_balance',
+          required,
+          balance,
+          currency: requestCurrency,
+          balanceOwnerRole: 'customer',
+          balanceUserId: userMongoId,
+          taskId: String(task._id),
+        })
+      }
       return res.status(500).json({ error: 'escrow_freeze_failed' })
     }
 
@@ -343,10 +366,7 @@ export function createApplicationsApi() {
           clientMongoId: userMongoId,
           executorId,
           executorMongoId: executorMongoId,
-          escrowAmount:
-            typeof task.budgetAmount === 'number' && Number.isFinite(task.budgetAmount) && task.budgetAmount >= 0
-              ? task.budgetAmount
-              : 0,
+          escrowAmount: amountRub,
           status: 'active',
           revisionIncluded: 2,
           revisionUsed: 0,
@@ -477,6 +497,13 @@ export function createApplicationsApi() {
         typeof task.budgetAmount === 'number' && Number.isFinite(task.budgetAmount) && task.budgetAmount >= 0
           ? task.budgetAmount
           : 0
+      const budgetCurrency = normalizeCurrency(task.budgetCurrency) ?? 'RUB'
+      const locale = inferLocale(req)
+      const requestCurrency = currencyFromLocale(locale)
+      const usdRubRate = budgetCurrency === 'USD' || requestCurrency === 'USD'
+        ? await getUsdRubRate({ dataDir: req.app?.locals?.dataDir })
+        : null
+      const amountRub = budgetCurrency === 'USD' ? toRub(amount, 'USD', usdRubRate) : round2(amount)
       const fr = await freezeEscrow({
         db,
         balanceRepo: req.app?.locals?.balanceRepo,
@@ -486,10 +513,22 @@ export function createApplicationsApi() {
         customerMongoId: userMongoId,
         executorId,
         executorMongoId: executorMongoId,
-        amount,
+        amount: amountRub,
       })
       if (!fr.ok) {
-        if (fr.error === 'insufficient_balance') return res.status(409).json({ error: 'insufficient_balance', required: fr.required, balance: fr.balance })
+        if (fr.error === 'insufficient_balance') {
+          const required = requestCurrency === 'USD' ? fromRub(fr.required, 'USD', usdRubRate) : round2(fr.required)
+          const balance = requestCurrency === 'USD' ? fromRub(fr.balance, 'USD', usdRubRate) : round2(fr.balance)
+          return res.status(409).json({
+            error: 'insufficient_balance',
+            required,
+            balance,
+            currency: requestCurrency,
+            balanceOwnerRole: 'customer',
+            balanceUserId: userMongoId,
+            taskId: String(task._id),
+          })
+        }
         return res.status(500).json({ error: 'escrow_freeze_failed' })
       }
 
@@ -684,6 +723,14 @@ export function createApplicationsApi() {
       typeof task.budgetAmount === 'number' && Number.isFinite(task.budgetAmount) && task.budgetAmount >= 0
         ? task.budgetAmount
         : 0
+    const budgetCurrency = normalizeCurrency(task.budgetCurrency) ?? 'RUB'
+    const locale = inferLocale(req)
+    const requestCurrency = currencyFromLocale(locale)
+    const usdRubRate = budgetCurrency === 'USD' || requestCurrency === 'USD'
+      ? await getUsdRubRate({ dataDir: req.app?.locals?.dataDir })
+      : null
+    const amountRubStored = typeof task.budgetAmountRub === 'number' && Number.isFinite(task.budgetAmountRub) ? task.budgetAmountRub : null
+    const amountRub = amountRubStored ?? (budgetCurrency === 'USD' ? toRub(amount, 'USD', usdRubRate) : round2(amount))
     const fr = await freezeEscrow({
       db,
       balanceRepo: req.app?.locals?.balanceRepo,
@@ -693,10 +740,14 @@ export function createApplicationsApi() {
       customerMongoId: userMongoId,
       executorId,
       executorMongoId: executorMongoId,
-      amount,
+      amount: amountRub,
     })
     if (!fr.ok) {
-      if (fr.error === 'insufficient_balance') return res.status(409).json({ error: 'insufficient_balance', required: fr.required, balance: fr.balance })
+      if (fr.error === 'insufficient_balance') {
+        const required = requestCurrency === 'USD' ? fromRub(fr.required, 'USD', usdRubRate) : round2(fr.required)
+        const balance = requestCurrency === 'USD' ? fromRub(fr.balance, 'USD', usdRubRate) : round2(fr.balance)
+        return res.status(409).json({ error: 'insufficient_balance', required, balance, currency: requestCurrency })
+      }
       return res.status(500).json({ error: 'escrow_freeze_failed' })
     }
 
@@ -709,10 +760,7 @@ export function createApplicationsApi() {
           clientMongoId: userMongoId,
           executorId,
           executorMongoId: executorMongoId,
-          escrowAmount:
-            typeof task.budgetAmount === 'number' && Number.isFinite(task.budgetAmount) && task.budgetAmount >= 0
-              ? task.budgetAmount
-              : 0,
+            escrowAmount: amountRub,
           status: 'active',
           revisionIncluded: 2,
           revisionUsed: 0,

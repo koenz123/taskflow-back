@@ -3,6 +3,9 @@ import mongoose from 'mongoose'
 import { tryResolveAuthUser } from '../auth/authSession.js'
 import { releaseEscrowToExecutor } from '../services/escrowService.js'
 import { createNotification } from '../services/notificationService.js'
+import { inferLocale } from '../infra/locale.js'
+import { currencyFromLocale, fromRub, round2 } from '../infra/money.js'
+import { getUsdRubRate } from '../infra/usdRubRate.js'
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
@@ -51,6 +54,19 @@ function toDto(doc) {
     createdAt: createdAt ? new Date(createdAt).toISOString() : null,
     updatedAt: updatedAt ? new Date(updatedAt).toISOString() : null,
     ...rest,
+  }
+}
+
+function withMoney(dto, { currency, usdRubRate }) {
+  if (!dto) return dto
+  const escrowRub = typeof dto.escrowAmount === 'number' && Number.isFinite(dto.escrowAmount) ? dto.escrowAmount : null
+  if (escrowRub == null) return { ...dto, escrowCurrency: currency }
+  const escrowAmount = currency === 'USD' ? fromRub(escrowRub, 'USD', usdRubRate) : round2(escrowRub)
+  return {
+    ...dto,
+    escrowAmount,
+    escrowCurrency: currency,
+    escrowAmountRub: round2(escrowRub),
   }
 }
 
@@ -137,6 +153,8 @@ export function createContractsApi() {
     if (!r.ok) return res.json([])
     const role = typeof r.user?.role === 'string' && r.user.role ? r.user.role : 'pending'
     const { userMongoId, userPublicId } = getAuthIds(r)
+    const currency = currencyFromLocale(inferLocale(req))
+    const usdRubRate = currency === 'USD' ? await getUsdRubRate({ dataDir: req.app?.locals?.dataDir }) : null
 
     const db = mongoose.connection.db
     if (!db) return res.status(500).json({ error: 'mongo_not_available' })
@@ -150,7 +168,7 @@ export function createContractsApi() {
         .sort({ createdAt: -1 })
         .limit(500)
         .toArray()
-      return res.json(items.map(toDto))
+      return res.json(items.map((x) => withMoney(toDto(x), { currency, usdRubRate })))
     }
 
     if (role === 'customer') {
@@ -171,7 +189,7 @@ export function createContractsApi() {
       const taskIds = ownedTasks.map((t) => String(t._id))
       if (!taskIds.length) return res.json([])
       const items = await contracts.find({ taskId: { $in: taskIds } }).sort({ createdAt: -1 }).limit(500).toArray()
-      return res.json(items.map(toDto))
+      return res.json(items.map((x) => withMoney(toDto(x), { currency, usdRubRate })))
     }
 
     return res.json([])
@@ -252,7 +270,9 @@ export function createContractsApi() {
       await recomputeTaskStatus({ db, taskId: contract.taskId })
     }
     const fresh = await contracts.findOne({ _id: oid }, { readPreference: 'primary' })
-    return res.json(toDto(fresh))
+    const currency = currencyFromLocale(inferLocale(req))
+    const usdRubRate = currency === 'USD' ? await getUsdRubRate({ dataDir: req.app?.locals?.dataDir }) : null
+    return res.json(withMoney(toDto(fresh), { currency, usdRubRate }))
   }))
 
   // Customer approves submitted work.
@@ -302,7 +322,9 @@ export function createContractsApi() {
       await recomputeTaskStatus({ db, taskId: contract.taskId })
     }
     const fresh = await contracts.findOne({ _id: oid }, { readPreference: 'primary' })
-    return res.json(toDto(fresh))
+    const currency = currencyFromLocale(inferLocale(req))
+    const usdRubRate = currency === 'USD' ? await getUsdRubRate({ dataDir: req.app?.locals?.dataDir }) : null
+    return res.json(withMoney(toDto(fresh), { currency, usdRubRate }))
   }))
 
   return router

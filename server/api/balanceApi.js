@@ -1,6 +1,9 @@
 import express from 'express'
 import { requireAuth } from '../auth/auth.js'
 import { logBusinessEvent } from '../infra/logBusinessEvent.js'
+import { inferLocale } from '../infra/locale.js'
+import { currencyFromLocale, fromRub, normalizeCurrency, round2, toRub } from '../infra/money.js'
+import { getUsdRubRate } from '../infra/usdRubRate.js'
 
 function normalizeSource(value) {
   if (value == null) return null
@@ -24,8 +27,14 @@ export function createBalanceApi({ balanceRepo }) {
 
   router.get('/api/balance', requireAuth, async (req, res, next) => {
     try {
-      const balance = await balanceRepo.get(req.user.id)
-      res.json({ userId: req.user.id, balance })
+      const locale = inferLocale(req)
+      const currency = currencyFromLocale(locale)
+      const dataDir = req.app?.locals?.dataDir
+      const usdRubRate = currency === 'USD' ? await getUsdRubRate({ dataDir }) : null
+
+      const balanceRub = await balanceRepo.get(req.user.id)
+      const balance = currency === 'USD' ? fromRub(balanceRub, 'USD', usdRubRate) : round2(balanceRub)
+      res.json({ userId: req.user.id, balance, currency })
     } catch (e) {
       next(e)
     }
@@ -43,10 +52,19 @@ export function createBalanceApi({ balanceRepo }) {
       if (delta == null) return res.status(400).json({ error: 'invalid_delta' })
       if (!reason) return res.status(400).json({ error: 'missing_reason' })
 
+      const locale = inferLocale(req)
+      const inferredCurrency = currencyFromLocale(locale)
+      const bodyCurrency = normalizeCurrency(req.body?.currency)
+      const currency = bodyCurrency ?? inferredCurrency
+      const dataDir = req.app?.locals?.dataDir
+      const usdRubRate = currency === 'USD' ? await getUsdRubRate({ dataDir }) : null
+
       const sourceHeader = req.headers['x-event-source'] ?? req.headers['x-balance-source'] ?? null
       const source = normalizeSource(req.body?.source ?? sourceHeader) ?? 'manual'
 
-      const newBalance = await balanceRepo.adjust(targetUserId, delta)
+      const deltaRub = currency === 'USD' ? toRub(delta, 'USD', usdRubRate) : round2(delta)
+      const newBalanceRub = await balanceRepo.adjust(targetUserId, deltaRub)
+      const newBalance = currency === 'USD' ? fromRub(newBalanceRub, 'USD', usdRubRate) : round2(newBalanceRub)
 
       await logBusinessEvent({
         req,
@@ -54,14 +72,16 @@ export function createBalanceApi({ balanceRepo }) {
         actor: targetUserId, // actor == баланс владельца (пока нет админ-ролей)
         target: null,
         meta: {
-          delta,
+          delta: deltaRub,
+          deltaCurrency: 'RUB',
           reason,
-          newBalance,
+          newBalance: newBalanceRub,
+          newBalanceCurrency: 'RUB',
           source,
         },
       })
 
-      res.json({ userId: targetUserId, balance: newBalance })
+      res.json({ userId: targetUserId, balance: newBalance, currency })
     } catch (e) {
       next(e)
     }

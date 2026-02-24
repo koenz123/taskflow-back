@@ -18,5 +18,9 @@ coverage
 data
 uploads
 
+# Frontend sources are developed separately; exclude from backend image.
+_front
+_tmp_taskflow-front
+
 .DS_Store
 

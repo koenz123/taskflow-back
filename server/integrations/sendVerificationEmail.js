@@ -81,6 +81,18 @@ async function trySendViaSmtp({ to, subject, text, html }) {
   }
 }
 
+/** Send a plain notification email (e.g. for POST /notify). Uses Resend or SMTP like verification emails. */
+export async function sendNotificationEmail(to, text) {
+  const subject = 'TaskFlow'
+  const body = String(text ?? '').trim() || 'Уведомление'
+  const html = `<div style="font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; line-height: 1.45; color: #111;">${escapeHtml(body).replace(/\n/g, '<br/>')}</div>`
+  const viaResend = await trySendViaResend({ to, subject, text: body, html })
+  if (viaResend.delivered) return { ok: true, channel: viaResend.channel }
+  const viaSmtp = await trySendViaSmtp({ to, subject, text: body, html })
+  if (viaSmtp.delivered) return { ok: true, channel: viaSmtp.channel }
+  return { ok: false, error: 'not_configured', meta: { resend: viaResend, smtp: viaSmtp } }
+}
+
 function hashCode({ code, token }) {
   // Token is long random, used as salt to avoid storing plain code.
   return crypto.createHash('sha256').update(`${token}:${code}`).digest('hex')

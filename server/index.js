@@ -91,6 +91,7 @@ console.log('[audit] enabled', {
 // Balance (simple JSON repo for now)
 const balanceRepo = createBalanceRepo({ dataDir: DATA_DIR })
 app.locals.balanceRepo = balanceRepo
+app.locals.dataDir = DATA_DIR
 
 // Connect Mongo in background (events/audit can still work if Mongo is down).
 connectMongo().then((r) => console.log('[mongo] enabled:', Boolean(r.enabled))).catch(() => {})

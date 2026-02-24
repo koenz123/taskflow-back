@@ -3,6 +3,9 @@ import mongoose from 'mongoose'
 import { tryResolveAuthUser } from '../auth/authSession.js'
 import { refundEscrowToCustomer, releaseEscrowToExecutor, splitEscrow } from '../services/escrowService.js'
 import { createNotification } from '../services/notificationService.js'
+import { inferLocale } from '../infra/locale.js'
+import { currencyFromLocale, round2, toRub } from '../infra/money.js'
+import { getUsdRubRate } from '../infra/usdRubRate.js'
 
 const SLA_MS = 24 * 60 * 60 * 1000
 
@@ -378,13 +381,22 @@ export function createDisputesApi() {
         } else if (decision.payout === 'customer') {
           await refundEscrowToCustomer({ db, balanceRepo: req.app?.locals?.balanceRepo, taskId, executorId })
         } else if (decision.payout === 'split' || decision.payout === 'partial') {
+          const locale = inferLocale(req)
+          const requestCurrency = currencyFromLocale(locale)
+          const usdRubRate = requestCurrency === 'USD'
+            ? await getUsdRubRate({ dataDir: req.app?.locals?.dataDir })
+            : null
+          const executorAmountRub =
+            requestCurrency === 'USD' ? toRub(decision.executorAmount, 'USD', usdRubRate) : round2(decision.executorAmount)
+          const customerAmountRub =
+            requestCurrency === 'USD' ? toRub(decision.customerAmount, 'USD', usdRubRate) : round2(decision.customerAmount)
           await splitEscrow({
             db,
             balanceRepo: req.app?.locals?.balanceRepo,
             taskId,
             executorId,
-            executorAmount: decision.executorAmount,
-            customerAmount: decision.customerAmount,
+            executorAmount: executorAmountRub,
+            customerAmount: customerAmountRub,
           })
         }
         await contracts.updateOne({ _id: contract._id }, { $set: { status: 'resolved', updatedAt: now } })
@@ -466,13 +478,22 @@ export function createDisputesApi() {
           } else if (decision.payout === 'customer') {
             await refundEscrowToCustomer({ db, balanceRepo: req.app?.locals?.balanceRepo, taskId, executorId })
           } else if (decision.payout === 'split' || decision.payout === 'partial') {
+            const locale = inferLocale(req)
+            const requestCurrency = currencyFromLocale(locale)
+            const usdRubRate = requestCurrency === 'USD'
+              ? await getUsdRubRate({ dataDir: req.app?.locals?.dataDir })
+              : null
+            const executorAmountRub =
+              requestCurrency === 'USD' ? toRub(decision.executorAmount, 'USD', usdRubRate) : round2(decision.executorAmount)
+            const customerAmountRub =
+              requestCurrency === 'USD' ? toRub(decision.customerAmount, 'USD', usdRubRate) : round2(decision.customerAmount)
             await splitEscrow({
               db,
               balanceRepo: req.app?.locals?.balanceRepo,
               taskId,
               executorId,
-              executorAmount: decision.executorAmount,
-              customerAmount: decision.customerAmount,
+              executorAmount: executorAmountRub,
+              customerAmount: customerAmountRub,
             })
           }
           await contracts.updateOne({ _id: contract._id }, { $set: { status: 'resolved', updatedAt: now } })

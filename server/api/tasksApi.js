@@ -3,6 +3,9 @@ import mongoose from 'mongoose'
 import { tryResolveAuthUser } from '../auth/authSession.js'
 import { freezeEscrow } from '../services/escrowService.js'
 import { canExecutorRespond } from '../services/executorSanctionsService.js'
+import { inferLocale } from '../infra/locale.js'
+import { currencyFromLocale, fromRub, normalizeCurrency, round2, toRub } from '../infra/money.js'
+import { getUsdRubRate } from '../infra/usdRubRate.js'
 
 function isObject(v) {
   return v !== null && typeof v === 'object' && !Array.isArray(v)
@@ -122,6 +125,13 @@ function toTaskDto(doc) {
     ...rest
   } = doc
   const createdByUserId = rest.createdByUserId ?? rest.userId ?? null
+  const budgetAmount =
+    typeof rest.budgetAmount === 'number' && Number.isFinite(rest.budgetAmount) ? rest.budgetAmount : rest.budgetAmount ?? null
+  const normalizedBudgetCurrency = normalizeCurrency(rest.budgetCurrency)
+  const budgetCurrency =
+    normalizedBudgetCurrency ?? (typeof budgetAmount === 'number' && Number.isFinite(budgetAmount) ? 'RUB' : rest.budgetCurrency ?? null)
+  const budgetAmountRubStored =
+    typeof rest.budgetAmountRub === 'number' && Number.isFinite(rest.budgetAmountRub) ? rest.budgetAmountRub : null
   return {
     id: String(_id),
     createdByUserId,
@@ -134,6 +144,15 @@ function toTaskDto(doc) {
     completedAt: completedAt ? new Date(completedAt).toISOString() : null,
     reviewSubmittedAt: reviewSubmittedAt ? new Date(reviewSubmittedAt).toISOString() : null,
     ...rest,
+    budgetAmount,
+    budgetCurrency,
+    budgetAmountRub:
+      budgetAmountRubStored ??
+      (typeof budgetAmount === 'number' && Number.isFinite(budgetAmount)
+        ? budgetCurrency === 'USD'
+          ? null // unknown without rate; computed server-side for escrow anyway
+          : round2(budgetAmount)
+        : null),
     // Backward compatibility: some older endpoints used userId as owner.
     userId: createdByUserId,
     assignedExecutorIds: Array.isArray(rest.assignedExecutorIds) ? rest.assignedExecutorIds : [],
@@ -235,7 +254,14 @@ export function createTasksApi() {
 
     const budgetAmount =
       typeof req.body?.budgetAmount === 'number' && Number.isFinite(req.body.budgetAmount) ? req.body.budgetAmount : null
-    const budgetCurrency = trimOrNull(req.body?.budgetCurrency)
+    const budgetCurrency = normalizeCurrency(req.body?.budgetCurrency) ?? (budgetAmount != null ? 'RUB' : null)
+    const usdRubRateForWrite = budgetCurrency === 'USD' ? await getUsdRubRate({ dataDir: req.app?.locals?.dataDir }) : null
+    const budgetAmountRub =
+      budgetAmount != null
+        ? budgetCurrency === 'USD'
+          ? toRub(budgetAmount, 'USD', usdRubRateForWrite)
+          : round2(budgetAmount)
+        : null
 
     const maxExecutors = clampInt(req.body?.maxExecutors, { min: 1, max: 50, fallback: 1 })
 
@@ -273,6 +299,7 @@ export function createTasksApi() {
       location,
       budgetAmount,
       budgetCurrency,
+      budgetAmountRub,
       dueDate,
       expiresAt,
       maxExecutors,
@@ -412,6 +439,15 @@ export function createTasksApi() {
       typeof existing.budgetAmount === 'number' && Number.isFinite(existing.budgetAmount) && existing.budgetAmount >= 0
         ? existing.budgetAmount
         : 0
+    const budgetCurrency = normalizeCurrency(existing.budgetCurrency) ?? 'RUB'
+    const locale = inferLocale(req)
+    const requestCurrency = currencyFromLocale(locale)
+    const usdRubRate = budgetCurrency === 'USD' || requestCurrency === 'USD'
+      ? await getUsdRubRate({ dataDir: req.app?.locals?.dataDir })
+      : null
+    const amountRubStored =
+      typeof existing.budgetAmountRub === 'number' && Number.isFinite(existing.budgetAmountRub) ? existing.budgetAmountRub : null
+    const amountRub = amountRubStored ?? (budgetCurrency === 'USD' ? toRub(amount, 'USD', usdRubRate) : round2(amount))
     const customerId =
       typeof existing.createdByUserId === 'string' && existing.createdByUserId ? existing.createdByUserId : null
     if (customerId) {
@@ -424,10 +460,26 @@ export function createTasksApi() {
         customerMongoId: typeof existing.createdByMongoId === 'string' && existing.createdByMongoId ? existing.createdByMongoId : null,
         executorId: userPublicId,
         executorMongoId: userMongoId,
-        amount,
+        amount: amountRub,
       })
       if (!fr.ok) {
-        if (fr.error === 'insufficient_balance') return res.status(409).json({ error: 'insufficient_balance', required: fr.required, balance: fr.balance })
+        if (fr.error === 'insufficient_balance') {
+          const required = requestCurrency === 'USD' ? fromRub(fr.required, 'USD', usdRubRate) : round2(fr.required)
+          const balance = requestCurrency === 'USD' ? fromRub(fr.balance, 'USD', usdRubRate) : round2(fr.balance)
+          const balanceUserId =
+            (typeof existing.createdByMongoId === 'string' && existing.createdByMongoId ? existing.createdByMongoId : null) ??
+            (typeof customerId === 'string' && customerId ? customerId : null)
+          return res.status(409).json({
+            error: 'insufficient_balance',
+            required,
+            balance,
+            currency: requestCurrency,
+            // Who is missing funds (escrow is frozen from customer).
+            balanceOwnerRole: 'customer',
+            balanceUserId,
+            taskId: String(existing._id),
+          })
+        }
         return res.status(500).json({ error: 'escrow_freeze_failed' })
       }
     }
@@ -458,10 +510,7 @@ export function createTasksApi() {
             clientMongoId,
             executorId: userPublicId,
             executorMongoId: userMongoId,
-            escrowAmount:
-              typeof existing.budgetAmount === 'number' && Number.isFinite(existing.budgetAmount) && existing.budgetAmount >= 0
-                ? existing.budgetAmount
-                : 0,
+            escrowAmount: amountRub,
             status: 'active',
             revisionIncluded: 2,
             revisionUsed: 0,
@@ -583,7 +632,25 @@ export function createTasksApi() {
     if (typeof req.body?.budgetAmount === 'number' && Number.isFinite(req.body.budgetAmount)) {
       update.$set.budgetAmount = req.body.budgetAmount
     }
-    if (typeof req.body?.budgetCurrency === 'string') update.$set.budgetCurrency = req.body.budgetCurrency.trim()
+    if (req.body?.budgetCurrency !== undefined) {
+      const next = normalizeCurrency(req.body.budgetCurrency)
+      if (next) update.$set.budgetCurrency = next
+    }
+    // If budget changes, keep budgetAmountRub in sync (canonical RUB amount for economy).
+    const nextBudgetAmount =
+      typeof req.body?.budgetAmount === 'number' && Number.isFinite(req.body.budgetAmount)
+        ? req.body.budgetAmount
+        : typeof existing.budgetAmount === 'number' && Number.isFinite(existing.budgetAmount)
+          ? existing.budgetAmount
+          : null
+    const nextBudgetCurrency =
+      req.body?.budgetCurrency !== undefined
+        ? normalizeCurrency(req.body.budgetCurrency) ?? normalizeCurrency(existing.budgetCurrency) ?? 'RUB'
+        : normalizeCurrency(existing.budgetCurrency) ?? 'RUB'
+    if (nextBudgetAmount != null) {
+      const rate = nextBudgetCurrency === 'USD' ? await getUsdRubRate({ dataDir: req.app?.locals?.dataDir }) : null
+      update.$set.budgetAmountRub = nextBudgetCurrency === 'USD' ? toRub(nextBudgetAmount, 'USD', rate) : round2(nextBudgetAmount)
+    }
     if (typeof req.body?.dueDate === 'string') update.$set.dueDate = req.body.dueDate.trim()
     if (typeof req.body?.expiresAt === 'string') update.$set.expiresAt = req.body.expiresAt.trim()
     if (typeof req.body?.maxExecutors === 'number' && Number.isFinite(req.body.maxExecutors)) {
