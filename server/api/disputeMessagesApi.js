@@ -98,7 +98,7 @@ async function canAccessDispute({ db, disputeId, userPublicId, userMongoId, role
   const dispute = await disputes.findOne({ _id: oid }, { readPreference: 'primary' })
   if (!dispute) return { ok: false, error: 'not_found' }
 
-  const isArbiter = role === 'arbiter' && dispute.assignedArbiterId === userPublicId
+  const isArbiter = role === 'arbiter'
   const isExecutor = role === 'executor' && (dispute.executorId === userPublicId || dispute.executorId === userMongoId)
   const isCustomer = role === 'customer' && (dispute.customerId === userPublicId || dispute.customerId === userMongoId)
   if (!isArbiter && !isExecutor && !isCustomer) return { ok: false, error: 'forbidden' }

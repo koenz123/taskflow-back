@@ -1,7 +1,7 @@
 import express from 'express'
 import mongoose from 'mongoose'
 import { tryResolveAuthUser } from '../auth/authSession.js'
-import { releaseEscrowToExecutor } from '../services/escrowService.js'
+import { releaseEscrowToExecutor, refundEscrowToCustomer } from '../services/escrowService.js'
 import { createNotification } from '../services/notificationService.js'
 import { inferLocale } from '../infra/locale.js'
 import { currencyFromLocale, fromRub, round2 } from '../infra/money.js'
@@ -195,6 +195,42 @@ export function createContractsApi() {
     return res.json([])
   }))
 
+  // GET /api/contracts/:contractId — single contract (arbiter: any; executor/customer: own only).
+  router.get('/api/contracts/:contractId', asyncHandler(async (req, res) => {
+    const r = await tryResolveAuthUser(req)
+    if (!r.ok) return res.status(401).json({ error: r.error })
+    const role = typeof r.user?.role === 'string' && r.user.role ? r.user.role : 'pending'
+    const { userMongoId, userPublicId } = getAuthIds(r)
+    const currency = currencyFromLocale(inferLocale(req))
+    const usdRubRate = currency === 'USD' ? await getUsdRubRate({ dataDir: req.app?.locals?.dataDir }) : null
+
+    const contractIdRaw = typeof req.params?.contractId === 'string' ? req.params.contractId.trim() : ''
+    if (!contractIdRaw) return res.status(400).json({ error: 'missing_contractId' })
+    let oid = null
+    try {
+      oid = new mongoose.Types.ObjectId(contractIdRaw)
+    } catch {
+      return res.status(400).json({ error: 'bad_contract_id' })
+    }
+
+    const db = mongoose.connection.db
+    if (!db) return res.status(500).json({ error: 'mongo_not_available' })
+    const contracts = db.collection('contracts')
+    const contract = await contracts.findOne({ _id: oid }, { readPreference: 'primary' })
+    if (!contract) return res.status(404).json({ error: 'not_found' })
+
+    if (role === 'arbiter') {
+      return res.json(withMoney(toDto(contract), { currency, usdRubRate }))
+    }
+    if (role === 'executor' && (contract.executorId === userPublicId || contract.executorId === userMongoId)) {
+      return res.json(withMoney(toDto(contract), { currency, usdRubRate }))
+    }
+    if (role === 'customer' && (contract.clientId === userPublicId || contract.clientId === userMongoId)) {
+      return res.json(withMoney(toDto(contract), { currency, usdRubRate }))
+    }
+    return res.status(403).json({ error: 'forbidden' })
+  }))
+
   // Customer requests revision on submitted work.
   router.post('/api/contracts/:contractId/request-revision', asyncHandler(async (req, res) => {
     const r = await tryResolveAuthUser(req)
@@ -321,6 +357,96 @@ export function createContractsApi() {
     if (contract.taskId) {
       await recomputeTaskStatus({ db, taskId: contract.taskId })
     }
+    const fresh = await contracts.findOne({ _id: oid }, { readPreference: 'primary' })
+    const currency = currencyFromLocale(inferLocale(req))
+    const usdRubRate = currency === 'USD' ? await getUsdRubRate({ dataDir: req.app?.locals?.dataDir }) : null
+    return res.json(withMoney(toDto(fresh), { currency, usdRubRate }))
+  }))
+
+  // Customer cancels contract (e.g. "change executor"): remove executor from task, refund escrow, notify removed executor.
+  router.post('/api/contracts/:contractId/cancel', asyncHandler(async (req, res) => {
+    const r = await tryResolveAuthUser(req)
+    if (!r.ok) return res.status(401).json({ error: r.error })
+    const role = typeof r.user?.role === 'string' && r.user.role ? r.user.role : 'pending'
+    if (role !== 'customer') return res.status(403).json({ error: 'forbidden' })
+    const { userMongoId, userPublicId } = getAuthIds(r)
+
+    let oid = null
+    try {
+      oid = new mongoose.Types.ObjectId(String(req.params.contractId))
+    } catch {
+      oid = null
+    }
+    if (!oid) return res.status(400).json({ error: 'bad_contract_id' })
+
+    const db = mongoose.connection.db
+    if (!db) return res.status(500).json({ error: 'mongo_not_available' })
+    const contracts = db.collection('contracts')
+    const assignments = db.collection('assignments')
+    const tasks = db.collection('tasks')
+    const applications = db.collection('applications')
+
+    const contract = await contracts.findOne({ _id: oid }, { readPreference: 'primary' })
+    if (!contract) return res.status(404).json({ error: 'not_found' })
+    const isOwner = contract.clientId === userPublicId || contract.clientId === userMongoId
+    if (!isOwner) return res.status(403).json({ error: 'forbidden' })
+
+    const status = normalizeStatus(contract.status)
+    if (status === 'cancelled' || status === 'approved' || status === 'resolved') {
+      return res.status(409).json({ error: 'invalid_status', status })
+    }
+
+    const taskId = typeof contract.taskId === 'string' ? contract.taskId : null
+    const executorId = typeof contract.executorId === 'string' ? contract.executorId : null
+    if (!taskId || !executorId) return res.status(500).json({ error: 'bad_contract' })
+
+    const now = new Date()
+
+    await contracts.updateOne({ _id: oid }, { $set: { status: 'cancelled', updatedAt: now } })
+
+    await assignments.updateOne(
+      { taskId, executorId },
+      { $set: { status: 'cancelled_by_customer', updatedAt: now } },
+    )
+
+    try {
+      await tasks.updateOne(
+        { _id: new mongoose.Types.ObjectId(taskId) },
+        { $pull: { assignedExecutorIds: executorId }, $set: { updatedAt: now } },
+      )
+    } catch {
+      // ignore
+    }
+
+    await refundEscrowToCustomer({
+      db,
+      balanceRepo: req.app?.locals?.balanceRepo,
+      taskId,
+      executorId,
+    }).catch(() => {})
+
+    await applications
+      .updateOne(
+        { taskId, executorUserId: executorId, status: 'selected' },
+        { $set: { status: 'rejected', updatedAt: now } },
+      )
+      .catch(() => {})
+
+    if (taskId) await recomputeTaskStatus({ db, taskId })
+
+    // Notify removed executor (backend sends notification when executor is changed).
+    const executorMongoId =
+      typeof contract?.executorMongoId === 'string' && contract.executorMongoId
+        ? contract.executorMongoId
+        : await resolveMongoIdFromPublicId(db, executorId)
+    if (executorMongoId) {
+      await addNotification(db, executorMongoId, 'Вас сняли с задания. Заказчик выбрал другого исполнителя.', {
+        type: 'task_assigned_else',
+        taskId,
+        actorUserId: userPublicId,
+      })
+    }
+
     const fresh = await contracts.findOne({ _id: oid }, { readPreference: 'primary' })
     const currency = currencyFromLocale(inferLocale(req))
     const usdRubRate = currency === 'USD' ? await getUsdRubRate({ dataDir: req.app?.locals?.dataDir }) : null

@@ -247,6 +247,12 @@ export function createTasksApi() {
     const category = trimOrNull(req.body?.category)
     const location = trimOrNull(req.body?.location)
     const dueDate = trimOrNull(req.body?.dueDate)
+    const executionDays =
+      typeof req.body?.executionDays === 'number' && Number.isFinite(req.body.executionDays)
+        ? Math.max(1, Math.min(365, Math.floor(req.body.executionDays)))
+        : typeof req.body?.executionDays === 'string' && /^\d+$/.test(req.body.executionDays.trim())
+          ? Math.max(1, Math.min(365, parseInt(req.body.executionDays.trim(), 10)))
+          : undefined
     const expiresAt = (() => {
       const v = trimOrNull(req.body?.expiresAt)
       return v || calcExpiresAt(now)
@@ -301,6 +307,7 @@ export function createTasksApi() {
       budgetCurrency,
       budgetAmountRub,
       dueDate,
+      ...(executionDays != null ? { executionDays } : {}),
       expiresAt,
       maxExecutors,
       assignedExecutorIds: [],
@@ -652,6 +659,15 @@ export function createTasksApi() {
       update.$set.budgetAmountRub = nextBudgetCurrency === 'USD' ? toRub(nextBudgetAmount, 'USD', rate) : round2(nextBudgetAmount)
     }
     if (typeof req.body?.dueDate === 'string') update.$set.dueDate = req.body.dueDate.trim()
+    if (req.body?.executionDays !== undefined) {
+      const ed =
+        typeof req.body.executionDays === 'number' && Number.isFinite(req.body.executionDays)
+          ? Math.max(1, Math.min(365, Math.floor(req.body.executionDays)))
+          : typeof req.body.executionDays === 'string' && /^\d+$/.test(String(req.body.executionDays).trim())
+            ? Math.max(1, Math.min(365, parseInt(String(req.body.executionDays).trim(), 10)))
+            : null
+      if (ed != null) update.$set.executionDays = ed
+    }
     if (typeof req.body?.expiresAt === 'string') update.$set.expiresAt = req.body.expiresAt.trim()
     if (typeof req.body?.maxExecutors === 'number' && Number.isFinite(req.body.maxExecutors)) {
       const me = Math.floor(req.body.maxExecutors)

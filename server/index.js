@@ -5,6 +5,7 @@ import cors from 'cors'
 import { createVideoApi } from './api/videoApi.js'
 import { createAuthApi } from './api/authApi.js'
 import { createConnectApi } from './api/connectApi.js'
+import oauthRoutes from './oauth/oauth.routes.js'
 import { attachRequestId, createAuditor } from './infra/audit.js'
 import { connectMongo } from './infra/db.js'
 import { logEvent } from './infra/logEvent.js'
@@ -26,6 +27,7 @@ import { createAssignmentsApi } from './api/assignmentsApi.js'
 import { createSubmissionsApi } from './api/submissionsApi.js'
 import { createDisputesApi } from './api/disputesApi.js'
 import { createDisputeMessagesApi } from './api/disputeMessagesApi.js'
+import { createSupportApi } from './api/supportApi.js'
 import { createUsersApi } from './api/usersApi.js'
 import { createUploadsApi } from './api/uploadsApi.js'
 import { createRatingsApi } from './api/ratingsApi.js'
@@ -165,6 +167,7 @@ app.use(
   }),
 )
 app.use(createConnectApi())
+app.use('/api/oauth', oauthRoutes)
 
 app.use(
   createAdminApi({
@@ -186,6 +189,7 @@ app.use(createAssignmentsApi())
 app.use(createSubmissionsApi())
 app.use(createDisputesApi())
 app.use(createDisputeMessagesApi())
+app.use(createSupportApi())
 app.use(createRatingsApi())
 
 app.use(

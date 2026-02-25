@@ -85,9 +85,16 @@ function normalizeDecision(value) {
 
 function toDto(doc) {
   if (!doc) return null
-  const { _id, createdAt, updatedAt, ...rest } = doc
+  const { _id, createdAt, updatedAt, contractId, openedByUserId, status, lockedDecisionAt, assignedArbiterId, version, ...rest } = doc
   return {
     id: String(_id),
+    _id: String(_id),
+    contractId: contractId != null ? String(contractId) : undefined,
+    openedByUserId: openedByUserId ?? undefined,
+    status: status ?? 'open',
+    lockedDecisionAt: lockedDecisionAt ? new Date(lockedDecisionAt).toISOString() : null,
+    assignedArbiterId: assignedArbiterId ?? null,
+    version: version != null ? Number(version) : undefined,
     createdAt: createdAt ? new Date(createdAt).toISOString() : null,
     updatedAt: updatedAt ? new Date(updatedAt).toISOString() : null,
     ...rest,
@@ -113,7 +120,7 @@ async function getContractAccess({ db, contractId, userPublicId, userMongoId }) 
 async function listAccessibleDisputes({ db, role, userPublicId, userMongoId }) {
   const disputes = db.collection('disputes')
   if (role === 'arbiter') {
-    const items = await disputes.find({ assignedArbiterId: userPublicId }).sort({ updatedAt: -1 }).limit(500).toArray()
+    const items = await disputes.find({}).sort({ updatedAt: -1 }).limit(500).toArray()
     return items
   }
   if (role === 'executor') {
@@ -153,7 +160,7 @@ export function createDisputesApi() {
       const items = await db.collection('disputes').find({ contractId }).sort({ updatedAt: -1 }).limit(50).toArray()
       // Filter to accessible by embedded ids
       const allowed = items.filter((d) => {
-        if (role === 'arbiter') return d.assignedArbiterId === userPublicId
+        if (role === 'arbiter') return true
         if (role === 'executor') return d.executorId === userPublicId || d.executorId === userMongoId
         if (role === 'customer') return d.customerId === userPublicId || d.customerId === userMongoId
         return false
@@ -163,6 +170,38 @@ export function createDisputesApi() {
 
     const items = await listAccessibleDisputes({ db, role, userPublicId, userMongoId })
     return res.json(items.map(toDto))
+  }))
+
+  // GET /api/disputes/:disputeId — single dispute by id (arbiter: any; executor/customer: own only).
+  router.get('/api/disputes/:disputeId', asyncHandler(async (req, res) => {
+    const r = await tryResolveAuthUser(req)
+    if (!r.ok) return res.status(401).json({ error: r.error })
+    const role = typeof r.user?.role === 'string' && r.user.role ? r.user.role : 'pending'
+    const { userMongoId, userPublicId } = getAuthIds(r)
+
+    const disputeIdRaw = typeof req.params?.disputeId === 'string' ? req.params.disputeId.trim() : ''
+    if (!disputeIdRaw) return res.status(400).json({ error: 'missing_disputeId' })
+    let oid = null
+    try {
+      oid = new mongoose.Types.ObjectId(disputeIdRaw)
+    } catch {
+      return res.status(400).json({ error: 'bad_dispute_id' })
+    }
+
+    const db = mongoose.connection.db
+    if (!db) return res.status(500).json({ error: 'mongo_not_available' })
+    const disputes = db.collection('disputes')
+    const dispute = await disputes.findOne({ _id: oid }, { readPreference: 'primary' })
+    if (!dispute) return res.status(404).json({ error: 'not_found' })
+
+    if (role === 'arbiter') return res.json(toDto(dispute))
+    if (role === 'executor' && (dispute.executorId === userPublicId || dispute.executorId === userMongoId)) {
+      return res.json(toDto(dispute))
+    }
+    if (role === 'customer' && (dispute.customerId === userPublicId || dispute.customerId === userMongoId)) {
+      return res.json(toDto(dispute))
+    }
+    return res.status(403).json({ error: 'forbidden' })
   }))
 
   // Open dispute (customer or executor).
@@ -326,6 +365,18 @@ export function createDisputesApi() {
       { returnDocument: 'after' },
     )
     const doc = update?.value ?? update
+    const disputeIdStr = String(oid)
+    try {
+      await db.collection('disputeMessages').insertOne({
+        disputeId: disputeIdStr,
+        authorUserId: userPublicId,
+        kind: 'system',
+        text: 'Арбитр запросил дополнительную информацию.',
+        createdAt: now,
+      })
+    } catch {
+      // ignore
+    }
     return res.json(toDto(doc))
   }))
 
