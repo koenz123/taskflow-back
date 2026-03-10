@@ -36,7 +36,7 @@ async function writeJson(filePath, data) {
   await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8')
 }
 
-export function createAdminApi({ dataDir }) {
+export function createAdminApi({ dataDir, balanceRepo = null }) {
   const router = express.Router()
   router.use(express.json())
 
@@ -187,6 +187,117 @@ export function createAdminApi({ dataDir }) {
       console.error('ADMIN CLEAR TASKS ERROR:', err)
       return res.status(500).json({ error: 'failed_to_clear_tasks' })
     }
+  })
+
+  // PATCH /api/admin/withdrawals/:id — body { status: 'processing' | 'paid' | 'rejected' }. При rejected — возврат на баланс.
+  router.patch('/api/admin/withdrawals/:id', async (req, res) => {
+    const adminToken = process.env.ADMIN_TOKEN || ''
+    const provided = typeof req.headers['x-admin-token'] === 'string' ? req.headers['x-admin-token'].trim() : ''
+    if (!adminToken || provided !== adminToken) return res.status(401).json({ error: 'unauthorized' })
+    const status = typeof req.body?.status === 'string' ? req.body.status.trim() : ''
+    if (!['processing', 'paid', 'rejected'].includes(status)) {
+      return res.status(400).json({ error: 'invalid_status', allowed: ['processing', 'paid', 'rejected'] })
+    }
+    const id = typeof req.params?.id === 'string' ? req.params.id.trim() : ''
+    if (!id) return res.status(400).json({ error: 'missing_id' })
+    let oid
+    try {
+      oid = new mongoose.Types.ObjectId(id)
+    } catch {
+      return res.status(400).json({ error: 'bad_id' })
+    }
+    const conn = await connectMongo()
+    if (!conn?.enabled || mongoose.connection.readyState !== 1) {
+      return res.status(500).json({ error: 'mongo_not_available' })
+    }
+    const db = mongoose.connection.db
+    if (!db) return res.status(500).json({ error: 'mongo_db_missing' })
+    const withdrawals = db.collection('withdrawalRequests')
+    const doc = await withdrawals.findOne({ _id: oid }, { readPreference: 'primary' })
+    if (!doc) return res.status(404).json({ error: 'not_found' })
+    if (doc.status === 'paid' && status !== 'paid') return res.status(409).json({ error: 'already_paid' })
+    if (doc.status === 'rejected') return res.status(409).json({ error: 'already_rejected' })
+    const now = new Date()
+    if (status === 'rejected' && balanceRepo && doc.userId && doc.amount != null) {
+      await balanceRepo.adjust(doc.userId, Number(doc.amount))
+    }
+    await withdrawals.updateOne({ _id: oid }, { $set: { status, updatedAt: now } })
+    const updated = await withdrawals.findOne({ _id: oid }, { readPreference: 'primary' })
+    return res.json({
+      id: String(updated._id),
+      userId: updated.userId,
+      amount: updated.amount,
+      status: updated.status,
+      updatedAt: updated.updatedAt ? new Date(updated.updatedAt).toISOString() : null,
+    })
+  })
+
+  // GET /api/admin/withdrawals — список заявок на вывод (для админки).
+  router.get('/api/admin/withdrawals', async (req, res) => {
+    const adminToken = process.env.ADMIN_TOKEN || ''
+    const provided = typeof req.headers['x-admin-token'] === 'string' ? req.headers['x-admin-token'].trim() : ''
+    if (!adminToken || provided !== adminToken) return res.status(401).json({ error: 'unauthorized' })
+    const conn = await connectMongo()
+    if (!conn?.enabled || mongoose.connection.readyState !== 1) {
+      return res.status(500).json({ error: 'mongo_not_available' })
+    }
+    const db = mongoose.connection.db
+    if (!db) return res.status(500).json({ error: 'mongo_db_missing' })
+    const list = await db
+      .collection('withdrawalRequests')
+      .find({})
+      .sort({ createdAt: -1 })
+      .limit(500)
+      .toArray()
+    const items = list.map((d) => ({
+      id: String(d._id),
+      userId: d.userId,
+      amount: d.amount,
+      legalStatus: d.legalStatus,
+      bankDetailsSnapshot: d.bankDetailsSnapshot,
+      status: d.status,
+      createdAt: d.createdAt ? new Date(d.createdAt).toISOString() : null,
+      updatedAt: d.updatedAt ? new Date(d.updatedAt).toISOString() : null,
+    }))
+    return res.json(items)
+  })
+
+  // PATCH /api/admin/users/:userId/payout-profile-status — body { status: 'verified' | 'rejected' }. Верификация профиля выплат.
+  router.patch('/api/admin/users/:userId/payout-profile-status', async (req, res) => {
+    const adminToken = process.env.ADMIN_TOKEN || ''
+    const provided = typeof req.headers['x-admin-token'] === 'string' ? req.headers['x-admin-token'].trim() : ''
+    if (!adminToken || provided !== adminToken) return res.status(401).json({ error: 'unauthorized' })
+    const status = typeof req.body?.status === 'string' ? req.body.status.trim() : ''
+    if (!['verified', 'rejected'].includes(status)) {
+      return res.status(400).json({ error: 'invalid_status', allowed: ['verified', 'rejected'] })
+    }
+    const userId = typeof req.params?.userId === 'string' ? req.params.userId.trim() : ''
+    if (!userId) return res.status(400).json({ error: 'missing_userId' })
+    let oid
+    try {
+      oid = new mongoose.Types.ObjectId(userId)
+    } catch {
+      return res.status(400).json({ error: 'bad_userId' })
+    }
+    const conn = await connectMongo()
+    if (!conn?.enabled || mongoose.connection.readyState !== 1) {
+      return res.status(500).json({ error: 'mongo_not_available' })
+    }
+    const db = mongoose.connection.db
+    if (!db) return res.status(500).json({ error: 'mongo_db_missing' })
+    const users = db.collection('users')
+    const user = await users.findOne({ _id: oid }, { projection: { payoutProfile: 1 }, readPreference: 'primary' })
+    if (!user) return res.status(404).json({ error: 'user_not_found' })
+    if (!user.payoutProfile) return res.status(400).json({ error: 'no_payout_profile' })
+    const now = new Date()
+    const payoutProfile = {
+      ...user.payoutProfile,
+      status,
+      updatedAt: now.toISOString(),
+    }
+    await users.updateOne({ _id: oid }, { $set: { payoutProfile, updatedAt: now } })
+    const updated = await users.findOne({ _id: oid }, { projection: { payoutProfile: 1 }, readPreference: 'primary' })
+    return res.json({ userId, payoutProfile: updated.payoutProfile })
   })
 
   // 🔴 Удаляет ВСЕ Telegram аккаунты

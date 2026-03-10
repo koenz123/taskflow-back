@@ -41,9 +41,18 @@ export async function getConnectAuthUrl(platform, state, redirectUri) {
   }
 
   // Instagram, TikTok, YouTube, Telegram, WhatsApp: require explicit env to be configured later
-  const envKey = `${p.toUpperCase().replace(/-/g, '_')}_CLIENT_ID`
-  const clientId = process.env[envKey] || ''
-  if (!clientId.trim()) return { configured: false, error: 'not_configured' }
+  let clientId = ''
+  if (p === 'tiktok') {
+    // TikTok uses "Client Key" naming in its portal; support both *_CLIENT_KEY and *_CLIENT_ID for compatibility.
+    clientId = process.env.TIKTOK_CLIENT_KEY || process.env.TIKTOK_CLIENT_ID || ''
+  } else if (p === 'youtube') {
+    // YouTube connect: use dedicated credentials only.
+    clientId = process.env.YOUTUBE_CLIENT_ID || ''
+  } else {
+    const envKey = `${p.toUpperCase().replace(/-/g, '_')}_CLIENT_ID`
+    clientId = process.env[envKey] || ''
+  }
+  if (!String(clientId || '').trim()) return { configured: false, error: 'not_configured' }
 
   if (p === 'instagram') {
     const authUrl = new URL('https://api.instagram.com/oauth/authorize')
@@ -56,20 +65,22 @@ export async function getConnectAuthUrl(platform, state, redirectUri) {
   }
 
   if (p === 'youtube') {
+    const csrfState = state
     const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth')
     authUrl.searchParams.set('client_id', clientId)
     authUrl.searchParams.set('redirect_uri', redirectUri)
     authUrl.searchParams.set('response_type', 'code')
-    authUrl.searchParams.set('scope', 'https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/userinfo.profile')
-    authUrl.searchParams.set('state', state)
+    authUrl.searchParams.set('scope', 'https://www.googleapis.com/auth/youtube.readonly')
     authUrl.searchParams.set('access_type', 'offline')
+    authUrl.searchParams.set('state', csrfState)
+    // Keep consent prompt to ensure refresh_token is returned reliably.
     authUrl.searchParams.set('prompt', 'consent')
     return { configured: true, authUrl: authUrl.toString() }
   }
 
   if (p === 'tiktok') {
     const csrfState = state
-    const authUrl = new URL('https://www.tiktok.com/auth/authorize/')
+    const authUrl = new URL('https://www.tiktok.com/v2/auth/authorize/')
     authUrl.searchParams.set('client_key', clientId)
     authUrl.searchParams.set('scope', 'user.info.basic')
     authUrl.searchParams.set('response_type', 'code')
@@ -142,8 +153,8 @@ export async function exchangeConnectCode(platform, code, redirectUri) {
   }
 
   if (p === 'youtube') {
-    const clientId = process.env.GOOGLE_WEB_CLIENT_ID || process.env.YOUTUBE_CLIENT_ID || ''
-    const clientSecret = process.env.GOOGLE_WEB_CLIENT_SECRET || process.env.YOUTUBE_CLIENT_SECRET || ''
+    const clientId = process.env.YOUTUBE_CLIENT_ID || ''
+    const clientSecret = process.env.YOUTUBE_CLIENT_SECRET || ''
     if (!clientId || !clientSecret) return { configured: false, ok: false, error: 'not_configured' }
     try {
       const tokenResp = await fetch('https://oauth2.googleapis.com/token', {
@@ -160,13 +171,22 @@ export async function exchangeConnectCode(platform, code, redirectUri) {
       const tokenData = await tokenResp.json()
       if (tokenData.error) return { configured: true, ok: false, error: tokenData.error_description || tokenData.error }
       const accessToken = tokenData.access_token
-      const userResp = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      })
-      const userData = await userResp.json()
-      const id = userData.id ? String(userData.id) : ''
-      const url = id ? `https://www.youtube.com/channel/${id}` : (userData.link || undefined)
-      return { configured: true, ok: true, profile: { id: id || undefined, username: userData.name || undefined, url } }
+      if (!accessToken) return { configured: true, ok: false, error: 'missing_access_token' }
+
+      const profileResp = await fetch(
+        'https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true',
+        { headers: { Authorization: `Bearer ${accessToken}` } },
+      )
+      const profileData = await profileResp.json()
+      if (profileData?.error) {
+        const message = profileData.error?.message || 'profile_fetch_failed'
+        return { configured: true, ok: false, error: message }
+      }
+      const channel = profileData?.items?.[0] || null
+      const channelId = channel?.id ? String(channel.id) : ''
+      if (!channelId) return { configured: true, ok: false, error: 'missing_channel_id' }
+      const url = `https://youtube.com/channel/${channelId}`
+      return { configured: true, ok: true, profile: { id: channelId, url } }
     } catch (e) {
       return { configured: true, ok: false, error: e instanceof Error ? e.message : 'request_failed' }
     }

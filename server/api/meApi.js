@@ -25,15 +25,19 @@ export function createMeApi() {
       userDoc.socials && typeof userDoc.socials === 'object' && !Array.isArray(userDoc.socials)
         ? userDoc.socials
         : {}
+    const username = userDoc.username ?? null
+    const telegramDisplay =
+      telegramUserId && (username ? `@${username}` : null) || (telegramUserId ? `ID ${telegramUserId}` : null)
 
     res.json({
       id: publicId,
       role: typeof userDoc.role === 'string' && userDoc.role ? userDoc.role : 'pending',
       telegramUserId,
+      telegramDisplay,
       fullName,
       email: typeof userDoc.email === 'string' ? userDoc.email : '',
       phone: typeof userDoc.phone === 'string' ? userDoc.phone : '',
-      username: userDoc.username ?? null,
+      username,
       photoUrl: userDoc.photoUrl ?? null,
       socials,
       mongoId: String(userDoc._id),
@@ -172,16 +176,21 @@ export function createMeApi() {
       [fresh.firstName, fresh.lastName].filter(Boolean).join(' ').trim() ||
       fresh.username ||
       publicId
+    const username = fresh.username ?? null
+    const telegramDisplay =
+      telegramUserId && (username ? `@${username}` : null) || (telegramUserId ? `ID ${telegramUserId}` : null)
 
     return res.json({
       id: publicId,
       role: typeof fresh.role === 'string' && fresh.role ? fresh.role : 'pending',
       telegramUserId,
+      telegramDisplay,
       fullName,
       email: typeof fresh.email === 'string' ? fresh.email : '',
       phone: typeof fresh.phone === 'string' ? fresh.phone : '',
-      username: fresh.username ?? null,
+      username,
       photoUrl: fresh.photoUrl ?? null,
+      socials: fresh.socials && typeof fresh.socials === 'object' && !Array.isArray(fresh.socials) ? fresh.socials : {},
       mongoId: String(fresh._id),
       createdAt: fresh.createdAt ?? null,
       updatedAt: fresh.updatedAt ?? null,

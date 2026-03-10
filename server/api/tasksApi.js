@@ -64,6 +64,29 @@ function normalizeDeliverables(v) {
   return out.length ? out : undefined
 }
 
+function normalizeReferenceItem(x) {
+  if (!isObject(x)) return null
+  const k = x.kind
+  if (k === 'url') {
+    const url = typeof x.url === 'string' ? x.url.trim() : ''
+    if (!url) return null
+    return { kind: 'url', url }
+  }
+  if (k === 'video') {
+    const url = typeof x.url === 'string' ? x.url.trim() : ''
+    const blobId = typeof x.blobId === 'string' ? x.blobId.trim() : ''
+    const name = typeof x.name === 'string' ? x.name.trim() : ''
+    const mimeType = typeof x.mimeType === 'string' && x.mimeType.trim() ? x.mimeType.trim() : undefined
+    if (!name) return null
+    if (!url && !blobId) return null
+    const out = { kind: 'video', name, mimeType }
+    if (url) out.url = url
+    if (blobId) out.blobId = blobId
+    return out
+  }
+  return null
+}
+
 function normalizeReference(v) {
   if (!isObject(v)) return undefined
   const kind = v.kind
@@ -73,11 +96,8 @@ function normalizeReference(v) {
     return { kind: 'url', url }
   }
   if (kind === 'video') {
-    const blobId = typeof v.blobId === 'string' ? v.blobId.trim() : ''
-    const name = typeof v.name === 'string' ? v.name.trim() : ''
-    const mimeType = typeof v.mimeType === 'string' && v.mimeType.trim() ? v.mimeType.trim() : undefined
-    if (!blobId || !name) return undefined
-    return { kind: 'video', blobId, name, mimeType }
+    const normalized = normalizeReferenceItem(v)
+    return normalized || undefined
   }
   if (kind === 'videos') {
     const videos = Array.isArray(v.videos) ? v.videos : null
@@ -85,15 +105,27 @@ function normalizeReference(v) {
     const normalized = videos
       .map((x) => {
         if (!isObject(x)) return null
+        const url = typeof x.url === 'string' ? x.url.trim() : ''
         const blobId = typeof x.blobId === 'string' ? x.blobId.trim() : ''
         const name = typeof x.name === 'string' ? x.name.trim() : ''
         const mimeType = typeof x.mimeType === 'string' && x.mimeType.trim() ? x.mimeType.trim() : undefined
-        if (!blobId || !name) return null
-        return { blobId, name, mimeType }
+        if (!name) return null
+        if (!url && !blobId) return null
+        const out = { name, mimeType }
+        if (url) out.url = url
+        if (blobId) out.blobId = blobId
+        return out
       })
       .filter(Boolean)
     if (!normalized.length) return undefined
     return { kind: 'videos', videos: normalized.slice(0, 3) }
+  }
+  if (kind === 'items') {
+    const items = Array.isArray(v.items) ? v.items : null
+    if (!items) return undefined
+    const normalized = items.map(normalizeReferenceItem).filter(Boolean)
+    if (!normalized.length) return undefined
+    return { kind: 'items', items: normalized }
   }
   return undefined
 }
@@ -223,6 +255,49 @@ export function createTasksApi() {
     const items = await tasks.find(query).sort({ createdAt: -1 }).limit(200).toArray()
 
     res.json(items.map(toTaskDto))
+  })
+
+  router.get('/api/tasks/:id', async (req, res) => {
+    const r = await tryResolveAuthUser(req)
+    if (!r.ok) return res.status(401).json({ error: r.error })
+    const userMongoId = String(r.userId)
+    const telegramUserId =
+      typeof r.user?.telegramUserId === 'string' && r.user.telegramUserId ? r.user.telegramUserId : null
+    const userPublicId = telegramUserId ? `tg_${telegramUserId}` : userMongoId
+    const role = typeof r.user?.role === 'string' && r.user.role ? r.user.role : 'pending'
+
+    const idRaw = typeof req.params?.id === 'string' ? req.params.id.trim() : ''
+    if (!idRaw) return res.status(400).json({ error: 'missing_task_id' })
+    let oid = null
+    try {
+      oid = new mongoose.Types.ObjectId(idRaw)
+    } catch {
+      return res.status(400).json({ error: 'bad_task_id' })
+    }
+
+    const db = mongoose.connection.db
+    if (!db) return res.status(500).json({ error: 'mongo_not_available' })
+    const tasks = db.collection('tasks')
+    const doc = await tasks.findOne({ _id: oid }, { readPreference: 'primary' })
+    if (!doc) return res.status(404).json({ error: 'not_found' })
+
+    const isOwner =
+      doc.createdByMongoId === userMongoId ||
+      doc.createdByUserId === userPublicId ||
+      doc.createdByUserId === userMongoId ||
+      doc.userId === userMongoId ||
+      doc.userId === userPublicId
+    const assignedIds = Array.isArray(doc.assignedExecutorIds) ? doc.assignedExecutorIds : []
+    const isAssigned = assignedIds.includes(userPublicId) || assignedIds.includes(userMongoId)
+    const isPublishedOpen =
+      doc.publishedAt &&
+      ['open', 'in_progress', 'review', 'dispute'].includes(String(doc.status ?? ''))
+
+    if (role === 'customer' && isOwner) return res.json(toTaskDto(doc))
+    if (role === 'executor' && (isAssigned || isPublishedOpen)) return res.json(toTaskDto(doc))
+    if (role === 'arbiter') return res.json(toTaskDto(doc))
+
+    return res.status(403).json({ error: 'forbidden' })
   })
 
   router.post('/api/tasks', async (req, res) => {

@@ -734,12 +734,15 @@ export function createAuthApi({ dataDir, appBaseUrl, audit = null, logEvent = nu
 
         // Atomic upsert prevents races and guarantees we have the document for JWT.
         const now = new Date()
+        const fullNameFromTg =
+          [tg.first_name, tg.last_name].filter(Boolean).join(' ').trim() || tg.username || null
         const update = {
           $set: {
             username: tg.username || null,
             firstName: tg.first_name || null,
             lastName: tg.last_name || null,
             photoUrl: tg.photo_url || null,
+            ...(fullNameFromTg ? { fullName: fullNameFromTg } : {}),
             updatedAt: now,
           },
           $setOnInsert: {
@@ -785,9 +788,20 @@ export function createAuthApi({ dataDir, appBaseUrl, audit = null, logEvent = nu
 
           if (chosen?._id) {
             // Keep profile fields up to date on canonical doc.
+            const fullNameFromTg =
+              [tg.first_name, tg.last_name].filter(Boolean).join(' ').trim() || tg.username || null
             await users.updateOne(
               { _id: chosen._id },
-              { $set: { username: tg.username || null, firstName: tg.first_name || null, lastName: tg.last_name || null, photoUrl: tg.photo_url || null, updatedAt: now } },
+              {
+                $set: {
+                  username: tg.username || null,
+                  firstName: tg.first_name || null,
+                  lastName: tg.last_name || null,
+                  photoUrl: tg.photo_url || null,
+                  ...(fullNameFromTg ? { fullName: fullNameFromTg } : {}),
+                  updatedAt: now,
+                },
+              },
             )
             const canonical = await users.findOne({ _id: chosen._id }, { readPreference: 'primary' })
             if (canonical) userDoc = canonical
@@ -811,7 +825,9 @@ export function createAuthApi({ dataDir, appBaseUrl, audit = null, logEvent = nu
       const fullName =
         [tg.first_name, tg.last_name].filter(Boolean).join(' ').trim() || tg.username || `tg_${telegramUserId}`
 
-      // Минимальный user для фронта. Роль пока неизвестна -> pending.
+      // Минимальный user для фронта. Роль пока неизвестна -> pending. telegramDisplay — для отображения в профиле.
+      const username = tg.username || userDoc.username || null
+      const telegramDisplay = username ? `@${username}` : `ID ${telegramUserId}`
       const user = {
         // Important: frontend expects stable id like tg_<id>
         // JWT still uses Mongo _id in `sub` for existence checks.
@@ -819,11 +835,12 @@ export function createAuthApi({ dataDir, appBaseUrl, audit = null, logEvent = nu
         role: typeof userDoc.role === 'string' && userDoc.role ? userDoc.role : 'pending',
         fullName,
         phone: '',
-        email: '',
+        email: typeof userDoc.email === 'string' ? userDoc.email : '',
         emailVerified: true,
         telegramUserId,
-        username: tg.username || null,
-        photoUrl: tg.photo_url || null,
+        telegramDisplay,
+        username: username,
+        photoUrl: tg.photo_url || userDoc.photoUrl || null,
         mongoId: String(userDoc._id),
       }
 

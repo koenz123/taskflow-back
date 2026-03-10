@@ -20,6 +20,19 @@ function trimSlash(s) {
   return typeof s === 'string' ? s.replace(/\/+$/, '') : ''
 }
 
+function resolveApiBase(req) {
+  const env = trimSlash(API_BASE)
+  // If API_BASE is explicitly configured (and not the default localhost), prefer it.
+  if (env && !/localhost|127\.0\.0\.1/i.test(env)) return env
+
+  const xfProto = String(req.headers?.['x-forwarded-proto'] || '').split(',')[0].trim()
+  const proto = xfProto || req.protocol || 'https'
+  const xfHost = String(req.headers?.['x-forwarded-host'] || '').split(',')[0].trim()
+  const host = xfHost || String(req.headers?.host || '').trim()
+  if (!host) return env || 'http://localhost:4000'
+  return `${proto}://${host}`
+}
+
 export function createConnectApi() {
   const router = express.Router()
 
@@ -45,7 +58,7 @@ export function createConnectApi() {
       { expiresIn: CONNECT_STATE_EXPIRY },
     )
     const callbackPath = getCallbackPath(platform)
-    const redirectUri = `${trimSlash(API_BASE)}${callbackPath}`
+    const redirectUri = `${resolveApiBase(req)}${callbackPath}`
 
     const result = await getConnectAuthUrl(platform, state, redirectUri)
     if (!result.configured || !result.authUrl) {
@@ -84,7 +97,7 @@ export function createConnectApi() {
     if (!userId) return redirectToProfile(res, platform, 'invalid_state')
 
     const callbackPath = getCallbackPath(platform)
-    const redirectUri = `${trimSlash(API_BASE)}${callbackPath}`
+    const redirectUri = `${resolveApiBase(req)}${callbackPath}`
 
     const exchangeResult = await exchangeConnectCode(platform, code, redirectUri)
     if (!exchangeResult.ok || !exchangeResult.profile) {

@@ -37,12 +37,13 @@ function toDto(doc) {
   }
 }
 
-async function addNotification(db, userMongoId, text, meta = null) {
+async function addNotification(db, recipientUserId, text, meta = null) {
   try {
-    if (!userMongoId) return
+    const id = typeof recipientUserId === 'string' ? recipientUserId : (recipientUserId && String(recipientUserId))
+    if (!id) return
     const msg = String(text || '').trim()
     if (!msg) return
-    await createNotification({ db, userId: String(userMongoId), text: msg, meta })
+    await createNotification({ db, userId: id, text: msg, meta })
   } catch {
     // ignore (best-effort)
   }
@@ -638,6 +639,15 @@ export function createApplicationsApi() {
 
     const now = new Date()
     await applications.updateOne({ _id: appOid }, { $set: { status: 'rejected', updatedAt: now } })
+    const recipientId = app.executorMongoId || app.executorUserId || null
+    if (recipientId) {
+      await addNotification(db, recipientId, 'Заказчик отклонил ваш отклик.', {
+        type: 'task_application_rejected',
+        taskId,
+        actorUserId: userPublicId,
+        applicationId: String(appOid),
+      })
+    }
     const fresh = await applications.findOne({ _id: appOid }, { readPreference: 'primary' })
     return res.json(toDto(fresh))
   }))
@@ -697,6 +707,15 @@ export function createApplicationsApi() {
       if (current === 'selected') return res.status(409).json({ error: 'already_selected' })
       const now = new Date()
       await applications.updateOne({ _id: appOid }, { $set: { status: 'rejected', updatedAt: now } })
+      const recipientId = app.executorMongoId || app.executorUserId || null
+      if (recipientId) {
+        await addNotification(db, recipientId, 'Заказчик отклонил ваш отклик.', {
+          type: 'task_application_rejected',
+          taskId,
+          actorUserId: userPublicId,
+          applicationId: String(appOid),
+        })
+      }
       const fresh = await applications.findOne({ _id: appOid }, { readPreference: 'primary' })
       return res.json(toDto(fresh))
     }
@@ -863,6 +882,15 @@ export function createApplicationsApi() {
 
     const now = new Date()
     await applications.updateOne({ _id: appOid }, { $set: { status: 'rejected', updatedAt: now } })
+    const recipientId = app.executorMongoId || app.executorUserId || null
+    if (recipientId) {
+      await addNotification(db, recipientId, 'Заказчик отклонил ваш отклик.', {
+        type: 'task_application_rejected',
+        taskId,
+        actorUserId: userPublicId,
+        applicationId: String(appOid),
+      })
+    }
     const fresh = await applications.findOne({ _id: appOid }, { readPreference: 'primary' })
     return res.json(toDto(fresh))
   }))
@@ -916,6 +944,15 @@ export function createApplicationsApi() {
 
     const now = new Date()
     await applications.updateOne({ _id: appOid }, { $set: { status: 'rejected', updatedAt: now } })
+    const recipientId = app.executorMongoId || app.executorUserId || null
+    if (recipientId) {
+      await addNotification(db, recipientId, 'Заказчик отклонил ваш отклик.', {
+        type: 'task_application_rejected',
+        taskId,
+        actorUserId: userPublicId,
+        applicationId: String(appOid),
+      })
+    }
     const fresh = await applications.findOne({ _id: appOid }, { readPreference: 'primary' })
     return res.json(toDto(fresh))
   }))

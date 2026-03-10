@@ -31,6 +31,8 @@ import { createSupportApi } from './api/supportApi.js'
 import { createUsersApi } from './api/usersApi.js'
 import { createUploadsApi } from './api/uploadsApi.js'
 import { createRatingsApi } from './api/ratingsApi.js'
+import { createPayoutApi } from './api/payoutApi.js'
+import { createTelephoneApi, warmupTelephoneBot } from './api/telephoneApi.js'
 import mongoose from 'mongoose'
 import { runAssignmentJobs } from './jobs/assignmentJobs.js'
 
@@ -172,6 +174,7 @@ app.use('/api/oauth', oauthRoutes)
 app.use(
   createAdminApi({
     dataDir: DATA_DIR,
+    balanceRepo,
   }),
 )
 
@@ -191,7 +194,11 @@ app.use(createDisputesApi())
 app.use(createDisputeMessagesApi())
 app.use(createSupportApi())
 app.use(createRatingsApi())
-
+app.use(
+  createPayoutApi({
+    balanceRepo,
+  }),
+)
 app.use(
   createGoalsApi({
     dataDir: DATA_DIR,
@@ -206,6 +213,9 @@ app.use(
 
 app.use(createEventsReadApi())
 
+app.use(createTelephoneApi())
+warmupTelephoneBot()
+
 app.use(
   createNotifyApi({
     dataDir: DATA_DIR,
@@ -214,7 +224,40 @@ app.use(
 
 // Telegram bot (long polling). Disabled if TELEGRAM_BOT_TOKEN isn't set.
 // Запускаем после того, как подключили все роуты.
-startTelegramBot({ dataDir: DATA_DIR })
+async function getPhoneByTelegramId(telegramUserId) {
+  try {
+    const conn = await connectMongo()
+    if (!conn?.enabled || mongoose.connection.readyState !== 1) return null
+    const db = mongoose.connection.db
+    if (!db) return null
+    const user = await db.collection('users').findOne(
+      { telegramUserId: String(telegramUserId) },
+      { projection: { phone: 1 } },
+    )
+    const p = user?.phone
+    return typeof p === 'string' && p.trim() ? p.trim() : null
+  } catch {
+    return null
+  }
+}
+
+async function updateUserPhoneByTelegramId(telegramUserId, phone) {
+  try {
+    const conn = await connectMongo()
+    if (!conn?.enabled || mongoose.connection.readyState !== 1) return { ok: false }
+    const db = mongoose.connection.db
+    if (!db) return { ok: false }
+    await db.collection('users').updateOne(
+      { telegramUserId: String(telegramUserId) },
+      { $set: { phone: String(phone).trim(), updatedAt: new Date() } },
+    )
+    return { ok: true }
+  } catch (e) {
+    console.warn('[tg] updateUserPhoneByTelegramId error', e?.message)
+    return { ok: false }
+  }
+}
+startTelegramBot({ dataDir: DATA_DIR, getPhoneByTelegramId, updateUserPhoneByTelegramId })
 
 startBackgroundJobs()
 
