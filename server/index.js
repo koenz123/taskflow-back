@@ -33,6 +33,7 @@ import { createUploadsApi } from './api/uploadsApi.js'
 import { createRatingsApi } from './api/ratingsApi.js'
 import { createPayoutApi } from './api/payoutApi.js'
 import { createTelephoneApi, warmupTelephoneBot } from './api/telephoneApi.js'
+import { createBrandsApi } from './api/brandsApi.js'
 import mongoose from 'mongoose'
 import { runAssignmentJobs } from './jobs/assignmentJobs.js'
 
@@ -179,6 +180,7 @@ app.use(
 )
 
 app.use(createMeApi())
+app.use(createBrandsApi())
 app.use(createUsersApi())
 app.use(createTasksApi())
 app.use(

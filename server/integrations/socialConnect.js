@@ -21,30 +21,35 @@ export function getCallbackPath(platform) {
 /**
  * @returns { Promise<{ configured: boolean, authUrl?: string, error?: string }> }
  */
-export async function getConnectAuthUrl(platform, state, redirectUri) {
+export async function getConnectAuthUrl(platform, state, redirectUri, opts = null) {
   const p = String(platform || '').toLowerCase()
   if (!isAllowed(p)) return { configured: false, error: 'invalid_platform' }
 
   if (p === 'vk') {
     const clientId = process.env.VK_CLIENT_ID || ''
     if (!clientId.trim()) return { configured: false, error: 'not_configured' }
-    const scope = process.env.VK_CONNECT_SCOPE || 'offline'
-    const v = process.env.VK_API_VERSION || '5.199'
-    const authUrl = new URL('https://oauth.vk.com/authorize')
-    authUrl.searchParams.set('client_id', clientId)
-    authUrl.searchParams.set('redirect_uri', redirectUri)
+    const codeChallenge = typeof opts?.codeChallenge === 'string' ? opts.codeChallenge : ''
+    if (!codeChallenge) return { configured: false, error: 'missing_pkce' }
+    // VK ID (OAuth 2.1 + PKCE). Docs: https://id.vk.com/.../auth-without-sdk-web
+    const scope = typeof process.env.VKID_SCOPE === 'string' && process.env.VKID_SCOPE.trim()
+      ? process.env.VKID_SCOPE.trim()
+      : 'email phone'
+    const authUrl = new URL('https://id.vk.ru/authorize')
     authUrl.searchParams.set('response_type', 'code')
+    authUrl.searchParams.set('client_id', clientId)
     authUrl.searchParams.set('scope', scope)
+    authUrl.searchParams.set('redirect_uri', redirectUri)
     authUrl.searchParams.set('state', state)
-    authUrl.searchParams.set('v', v)
+    authUrl.searchParams.set('code_challenge', codeChallenge)
+    authUrl.searchParams.set('code_challenge_method', 'S256')
     return { configured: true, authUrl: authUrl.toString() }
   }
 
   // Instagram, TikTok, YouTube, Telegram, WhatsApp: require explicit env to be configured later
   let clientId = ''
   if (p === 'tiktok') {
-    // TikTok uses "Client Key" naming in its portal; support both *_CLIENT_KEY and *_CLIENT_ID for compatibility.
-    clientId = process.env.TIKTOK_CLIENT_KEY || process.env.TIKTOK_CLIENT_ID || ''
+    // TikTok Login Kit uses Client Key only (not client_id).
+    clientId = process.env.TIKTOK_CLIENT_KEY || ''
   } else if (p === 'youtube') {
     // YouTube connect: use dedicated credentials only.
     clientId = process.env.YOUTUBE_CLIENT_ID || ''
@@ -81,7 +86,7 @@ export async function getConnectAuthUrl(platform, state, redirectUri) {
   if (p === 'tiktok') {
     const csrfState = state
     const authUrl = new URL('https://www.tiktok.com/v2/auth/authorize/')
-    authUrl.searchParams.set('client_key', clientId)
+    authUrl.searchParams.set('client_key', process.env.TIKTOK_CLIENT_KEY || '')
     authUrl.searchParams.set('scope', 'user.info.basic')
     authUrl.searchParams.set('response_type', 'code')
     authUrl.searchParams.set('redirect_uri', redirectUri)
@@ -95,9 +100,9 @@ export async function getConnectAuthUrl(platform, state, redirectUri) {
 
 /**
  * Exchange code for token and fetch profile. Save-friendly shape: { url?, username?, id? }.
- * @returns { Promise<{ configured: boolean, ok: boolean, profile?: { url?: string, username?: string, id?: string }, error?: string }> }
+ * @returns { Promise<{ configured: boolean, ok: boolean, profile?: object, error?: string }> }
  */
-export async function exchangeConnectCode(platform, code, redirectUri) {
+export async function exchangeConnectCode(platform, code, redirectUri, opts = null) {
   const p = String(platform || '').toLowerCase()
   if (!isAllowed(p)) return { configured: false, ok: false, error: 'invalid_platform' }
   const c = String(code || '').trim()
@@ -105,21 +110,87 @@ export async function exchangeConnectCode(platform, code, redirectUri) {
 
   if (p === 'vk') {
     const clientId = process.env.VK_CLIENT_ID || ''
-    const clientSecret = process.env.VK_CLIENT_SECRET || ''
-    if (!clientId || !clientSecret) return { configured: false, ok: false, error: 'not_configured' }
-    const tokenUrl = new URL('https://oauth.vk.com/access_token')
-    tokenUrl.searchParams.set('client_id', clientId)
-    tokenUrl.searchParams.set('client_secret', clientSecret)
-    tokenUrl.searchParams.set('redirect_uri', redirectUri)
-    tokenUrl.searchParams.set('code', c)
-    let resp
+    if (!clientId) return { configured: false, ok: false, error: 'not_configured' }
+    const deviceId = typeof opts?.deviceId === 'string' ? opts.deviceId.trim() : ''
+    const codeVerifier = typeof opts?.codeVerifier === 'string' ? opts.codeVerifier.trim() : ''
+    const state = typeof opts?.state === 'string' ? opts.state.trim() : ''
+    if (!deviceId) return { configured: true, ok: false, error: 'missing_device_id' }
+    if (!codeVerifier) return { configured: true, ok: false, error: 'missing_code_verifier' }
+    if (!state) return { configured: true, ok: false, error: 'missing_state' }
+
     try {
-      resp = await fetch(tokenUrl.toString())
-      const data = await resp.json()
-      if (data.error) return { configured: true, ok: false, error: data.error_description || data.error }
-      const userId = data.user_id != null ? String(data.user_id) : ''
-      const url = userId ? `https://vk.com/id${userId}` : undefined
-      return { configured: true, ok: true, profile: { id: userId || undefined, url } }
+      // VK ID token exchange (OAuth 2.1 + PKCE)
+      const tokenResp = await fetch('https://id.vk.ru/oauth2/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code',
+          code_verifier: codeVerifier,
+          redirect_uri: redirectUri,
+          code: c,
+          client_id: clientId,
+          device_id: deviceId,
+          state,
+        }),
+      })
+      const tokenData = await tokenResp.json()
+      if (tokenData?.error) {
+        return { configured: true, ok: false, error: tokenData.error_description || tokenData.error }
+      }
+      const accessToken = typeof tokenData?.access_token === 'string' ? tokenData.access_token : ''
+      const vkUserId = tokenData?.user_id != null ? String(tokenData.user_id) : ''
+      if (!accessToken || !vkUserId) return { configured: true, ok: false, error: 'vkid_bad_token_response' }
+
+      // VK ID user info
+      const infoResp = await fetch('https://id.vk.ru/oauth2/user_info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ access_token: accessToken, client_id: clientId }),
+      })
+      const infoData = await infoResp.json()
+      const user = infoData?.user || null
+      const firstName = typeof user?.first_name === 'string' ? user.first_name : undefined
+      const lastName = typeof user?.last_name === 'string' ? user.last_name : undefined
+      const photo = typeof user?.avatar === 'string' ? user.avatar : undefined
+      const email = typeof user?.email === 'string' ? user.email : undefined
+
+      // Best-effort: resolve pretty username/domain via VK API using VK ID access_token (if allowed).
+      let username = undefined
+      try {
+        const apiVersion = process.env.VK_API_VERSION || '5.199'
+        const userUrl = new URL('https://api.vk.com/method/users.get')
+        userUrl.searchParams.set('user_ids', vkUserId)
+        userUrl.searchParams.set('fields', 'domain,screen_name')
+        userUrl.searchParams.set('access_token', accessToken)
+        userUrl.searchParams.set('v', apiVersion)
+        const vkApiResp = await fetch(userUrl.toString())
+        const vkApiData = await vkApiResp.json()
+        const u = Array.isArray(vkApiData?.response) ? vkApiData.response[0] : null
+        const domain = typeof u?.domain === 'string' ? u.domain.trim() : ''
+        const screen = typeof u?.screen_name === 'string' ? u.screen_name.trim() : ''
+        username = domain || screen || undefined
+      } catch {
+        username = undefined
+      }
+
+      const profileUrl = username ? `https://vk.com/${username}` : `https://vk.com/id${vkUserId}`
+      const now = new Date()
+      return {
+        configured: true,
+        ok: true,
+        profile: {
+          connected: true,
+          vkUserId,
+          username,
+          firstName,
+          lastName,
+          photo,
+          email,
+          accessToken,
+          profileUrl,
+          connectedAt: now,
+        },
+      }
     } catch (e) {
       return { configured: true, ok: false, error: e instanceof Error ? e.message : 'request_failed' }
     }
@@ -193,7 +264,7 @@ export async function exchangeConnectCode(platform, code, redirectUri) {
   }
 
   if (p === 'tiktok') {
-    const clientKey = process.env.TIKTOK_CLIENT_KEY || process.env.TIKTOK_CLIENT_ID || ''
+    const clientKey = process.env.TIKTOK_CLIENT_KEY || ''
     const clientSecret = process.env.TIKTOK_CLIENT_SECRET || ''
     if (!clientKey || !clientSecret) return { configured: false, ok: false, error: 'not_configured' }
     try {
@@ -213,8 +284,41 @@ export async function exchangeConnectCode(platform, code, redirectUri) {
       })
       const tokenData = await tokenResp.json()
       if (tokenData.error) return { configured: true, ok: false, error: tokenData.error_description || tokenData.error }
-      const openId = tokenData.data?.open_id ? String(tokenData.data.open_id) : ''
-      return { configured: true, ok: true, profile: { id: openId || undefined } }
+      const accessToken = tokenData.data?.access_token
+      if (!accessToken) return { configured: true, ok: false, error: 'missing_access_token' }
+
+      const profileResp = await fetch(
+        'https://open.tiktokapis.com/v2/user/info/?fields=open_id,username,display_name,avatar_url',
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+        },
+      )
+      const profileData = await profileResp.json()
+      if (profileData?.error?.code !== undefined && profileData.error.code !== 0) {
+        const msg = profileData.error?.message || 'user_info_failed'
+        return { configured: true, ok: false, error: msg }
+      }
+      const user = profileData?.data?.user
+      if (!user) return { configured: true, ok: false, error: 'missing_user_info' }
+      const openId = user.open_id ? String(user.open_id) : ''
+      const username = typeof user.username === 'string' ? user.username.trim() || undefined : undefined
+      const displayName = typeof user.display_name === 'string' ? user.display_name.trim() || undefined : undefined
+      const avatar = typeof user.avatar_url === 'string' ? user.avatar_url.trim() || undefined : undefined
+      const url = username ? `https://www.tiktok.com/@${username}` : undefined
+      return {
+        configured: true,
+        ok: true,
+        profile: {
+          id: openId || undefined,
+          username,
+          displayName,
+          avatar,
+          url,
+        },
+      }
     } catch (e) {
       return { configured: true, ok: false, error: e instanceof Error ? e.message : 'request_failed' }
     }

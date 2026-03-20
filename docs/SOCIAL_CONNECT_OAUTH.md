@@ -69,8 +69,7 @@
 
 | Переменная               | Обязательно | Описание                    |
 |--------------------------|-------------|-----------------------------|
-| `TIKTOK_CLIENT_KEY`      | да*         | Client Key приложения       |
-| `TIKTOK_CLIENT_ID`       | нет         | Альтернатива к CLIENT_KEY  |
+| `TIKTOK_CLIENT_KEY`      | да          | Client Key приложения (в URL — client_key) |
 | `TIKTOK_CLIENT_SECRET`   | да          | Client Secret               |
 
 ---

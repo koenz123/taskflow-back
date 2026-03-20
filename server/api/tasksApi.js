@@ -144,6 +144,141 @@ function normalizeDescriptionFiles(v) {
   return normalized.length ? normalized.slice(0, 3) : undefined
 }
 
+function normalizeBrandId(v) {
+  if (v === null) return null
+  if (v === undefined) return undefined
+  const s = typeof v === 'string' ? v.trim() : ''
+  if (!s) return null
+  return s
+}
+
+function parseObjectId(v) {
+  const s = typeof v === 'string' ? v.trim() : ''
+  if (!s) return null
+  try {
+    return new mongoose.Types.ObjectId(s)
+  } catch {
+    return null
+  }
+}
+
+async function validateBrandOwnership({ db, brandId, userPublicId, userMongoId }) {
+  if (!brandId) return { ok: true }
+  const oid = parseObjectId(brandId)
+  if (!oid) return { ok: false, error: 'bad_brand_id' }
+  const brands = db.collection('brands')
+  const doc = await brands.findOne(
+    { _id: oid, $or: [{ ownerUserId: userPublicId }, { ownerMongoId: userMongoId }] },
+    { projection: { _id: 1, name: 1, logoUrl: 1 }, readPreference: 'primary' },
+  )
+  if (!doc) return { ok: false, error: 'brand_not_found_or_not_owned' }
+  const brandName = typeof doc?.name === 'string' && doc.name.trim() ? doc.name.trim() : null
+  const brandLogoUrl =
+    typeof doc?.logoUrl === 'string' && doc.logoUrl.trim() ? doc.logoUrl.trim() : null
+  return { ok: true, brandName, brandLogoUrl }
+}
+
+async function hydrateBrandIfNeeded({ db, dto }) {
+  if (!dto || typeof dto !== 'object') return dto
+  const brandId = typeof dto.brandId === 'string' && dto.brandId.trim() ? dto.brandId.trim() : ''
+  if (!brandId) return dto
+
+  const needsBrandObject = !dto.brand || typeof dto.brand !== 'object'
+  const hasName = typeof dto.brandName === 'string' && dto.brandName.trim()
+  const hasLogo = typeof dto.brandLogoUrl === 'string' && dto.brandLogoUrl.trim()
+  if (!needsBrandObject && hasName && hasLogo) return dto
+
+  const oid = parseObjectId(brandId)
+  if (!oid) return dto
+
+  const doc = await db.collection('brands').findOne(
+    { _id: oid },
+    { projection: { name: 1, logoUrl: 1, socials: 1, guidelines: 1 }, readPreference: 'primary' },
+  )
+  if (!doc) return dto
+
+  const name = typeof doc?.name === 'string' && doc.name.trim() ? doc.name.trim() : null
+  const logoUrl = typeof doc?.logoUrl === 'string' && doc.logoUrl.trim() ? doc.logoUrl.trim() : null
+  const socials = doc?.socials && typeof doc.socials === 'object' && !Array.isArray(doc.socials) ? doc.socials : {}
+  const guidelines = typeof doc?.guidelines === 'string' && doc.guidelines.trim() ? doc.guidelines : null
+
+  const next = { ...dto }
+  if (!hasName) next.brandName = name
+  if (!hasLogo) next.brandLogoUrl = logoUrl
+  if (needsBrandObject) {
+    next.brand = {
+      id: brandId,
+      name,
+      logoUrl,
+      socials,
+      guidelines,
+    }
+  }
+  return next
+}
+
+async function hydrateBrandsForList({ db, dtos }) {
+  if (!Array.isArray(dtos) || !dtos.length) return dtos
+  const ids = []
+  for (const t of dtos) {
+    const brandId = typeof t?.brandId === 'string' && t.brandId.trim() ? t.brandId.trim() : ''
+    if (!brandId) continue
+    const needsBrandObject = !t.brand || typeof t.brand !== 'object'
+    const hasName = typeof t?.brandName === 'string' && t.brandName.trim()
+    const hasLogo = typeof t?.brandLogoUrl === 'string' && t.brandLogoUrl.trim()
+    if (needsBrandObject || !hasName || !hasLogo) ids.push(brandId)
+  }
+  if (!ids.length) return dtos
+
+  const unique = Array.from(new Set(ids))
+  const oids = unique.map(parseObjectId).filter(Boolean)
+  if (!oids.length) return dtos
+
+  const brands = await db
+    .collection('brands')
+    .find(
+      { _id: { $in: oids } },
+      { projection: { name: 1, logoUrl: 1, socials: 1, guidelines: 1 }, readPreference: 'primary' },
+    )
+    .toArray()
+
+  const map = new Map(
+    brands.map((b) => [
+      String(b._id),
+      {
+        name: typeof b?.name === 'string' && b.name.trim() ? b.name.trim() : null,
+        logoUrl: typeof b?.logoUrl === 'string' && b.logoUrl.trim() ? b.logoUrl.trim() : null,
+        socials: b?.socials && typeof b.socials === 'object' && !Array.isArray(b.socials) ? b.socials : {},
+        guidelines: typeof b?.guidelines === 'string' && b.guidelines.trim() ? b.guidelines : null,
+      },
+    ]),
+  )
+
+  return dtos.map((t) => {
+    const brandId = typeof t?.brandId === 'string' && t.brandId.trim() ? t.brandId.trim() : ''
+    if (!brandId) return t
+    const meta = map.get(brandId)
+    if (!meta) return t
+
+    const next = { ...t }
+    const hasName = typeof next.brandName === 'string' && next.brandName.trim()
+    const hasLogo = typeof next.brandLogoUrl === 'string' && next.brandLogoUrl.trim()
+    if (!hasName) next.brandName = meta.name
+    if (!hasLogo) next.brandLogoUrl = meta.logoUrl
+    const needsBrandObject = !next.brand || typeof next.brand !== 'object'
+    if (needsBrandObject) {
+      next.brand = {
+        id: brandId,
+        name: meta.name,
+        logoUrl: meta.logoUrl,
+        socials: meta.socials,
+        guidelines: meta.guidelines,
+      }
+    }
+    return next
+  })
+}
+
 function toTaskDto(doc) {
   if (!doc) return null
   const {
@@ -176,6 +311,9 @@ function toTaskDto(doc) {
     completedAt: completedAt ? new Date(completedAt).toISOString() : null,
     reviewSubmittedAt: reviewSubmittedAt ? new Date(reviewSubmittedAt).toISOString() : null,
     ...rest,
+    brandId: typeof rest.brandId === 'string' && rest.brandId.trim() ? rest.brandId.trim() : null,
+    brandName: typeof rest.brandName === 'string' && rest.brandName.trim() ? rest.brandName.trim() : null,
+    brandLogoUrl: typeof rest.brandLogoUrl === 'string' && rest.brandLogoUrl.trim() ? rest.brandLogoUrl.trim() : null,
     budgetAmount,
     budgetCurrency,
     budgetAmountRub:
@@ -253,8 +391,9 @@ export function createTasksApi() {
     }
 
     const items = await tasks.find(query).sort({ createdAt: -1 }).limit(200).toArray()
-
-    res.json(items.map(toTaskDto))
+    const dtos = items.map(toTaskDto)
+    const hydrated = await hydrateBrandsForList({ db, dtos })
+    res.json(hydrated)
   })
 
   router.get('/api/tasks/:id', async (req, res) => {
@@ -294,8 +433,16 @@ export function createTasksApi() {
       ['open', 'in_progress', 'review', 'dispute'].includes(String(doc.status ?? ''))
 
     if (role === 'customer' && isOwner) return res.json(toTaskDto(doc))
-    if (role === 'executor' && (isAssigned || isPublishedOpen)) return res.json(toTaskDto(doc))
-    if (role === 'arbiter') return res.json(toTaskDto(doc))
+    if (role === 'executor' && (isAssigned || isPublishedOpen)) {
+      const dto = toTaskDto(doc)
+      const hydrated = await hydrateBrandIfNeeded({ db, dto })
+      return res.json(hydrated)
+    }
+    if (role === 'arbiter') {
+      const dto = toTaskDto(doc)
+      const hydrated = await hydrateBrandIfNeeded({ db, dto })
+      return res.json(hydrated)
+    }
 
     return res.status(403).json({ error: 'forbidden' })
   })
@@ -358,9 +505,19 @@ export function createTasksApi() {
     const lockedAfterPublish =
       typeof req.body?.lockedAfterPublish === 'boolean' ? req.body.lockedAfterPublish : undefined
     const editWindowExpiresAt = trimOrNull(req.body?.editWindowExpiresAt)
+    const brandId = normalizeBrandId(req.body?.brandId)
 
     const db = mongoose.connection.db
     if (!db) return res.status(500).json({ error: 'mongo_not_available' })
+
+    let brandName = null
+    let brandLogoUrl = null
+    if (brandId) {
+      const vr = await validateBrandOwnership({ db, brandId, userPublicId, userMongoId })
+      if (!vr.ok) return res.status(400).json({ error: vr.error })
+      brandName = vr.brandName ?? null
+      brandLogoUrl = vr.brandLogoUrl ?? null
+    }
 
     const tasks = db.collection('tasks')
     const insertRes = await tasks.insertOne({
@@ -374,6 +531,9 @@ export function createTasksApi() {
       // Legacy single-file shape (keep if provided; also self-heal from array).
       descriptionFile: descriptionFiles?.length ? descriptionFiles[0] : descriptionFile,
       reference,
+      brandId: brandId ?? null,
+      brandName: brandId ? brandName : null,
+      brandLogoUrl: brandId ? brandLogoUrl : null,
       executorMode,
       deliverables,
       category,
@@ -701,6 +861,20 @@ export function createTasksApi() {
     }
     if (req.body?.reference !== undefined) {
       update.$set.reference = normalizeReference(req.body.reference) ?? null
+    }
+    if (req.body?.brandId !== undefined) {
+      const brandId = normalizeBrandId(req.body.brandId)
+      if (brandId) {
+        const vr = await validateBrandOwnership({ db, brandId, userPublicId, userMongoId })
+        if (!vr.ok) return res.status(400).json({ error: vr.error })
+        update.$set.brandId = brandId
+        update.$set.brandName = vr.brandName ?? null
+        update.$set.brandLogoUrl = vr.brandLogoUrl ?? null
+      } else {
+        update.$set.brandId = null
+        update.$set.brandName = null
+        update.$set.brandLogoUrl = null
+      }
     }
     if (req.body?.deliverables !== undefined) {
       update.$set.deliverables = normalizeDeliverables(req.body.deliverables) ?? null

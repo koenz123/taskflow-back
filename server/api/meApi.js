@@ -4,6 +4,20 @@ import { requireAuth } from '../auth/auth.js'
 import mongoose from 'mongoose'
 import { canExecutorRespond, ensureSanctionsIndexes, violationLevelForExecutor } from '../services/executorSanctionsService.js'
 
+function normalizeTelegramUsername(value) {
+  if (value == null || typeof value !== 'string') return null
+  let s = value.trim()
+  if (s.startsWith('@')) s = s.slice(1).trim()
+  return s || null
+}
+
+function normalizeWhatsAppPhone(value) {
+  if (value == null || typeof value !== 'string') return null
+  const digits = value.replace(/\D/g, '')
+  if (digits.length < 10 || digits.length > 15) return null
+  return digits || null
+}
+
 export function createMeApi() {
   const router = express.Router()
   router.use(express.json({ limit: '1mb' }))
@@ -195,6 +209,78 @@ export function createMeApi() {
       createdAt: fresh.createdAt ?? null,
       updatedAt: fresh.updatedAt ?? null,
     })
+  })
+
+  // PATCH /api/profile/socials/telegram — сохранить Telegram без OAuth (username → socials.telegram)
+  router.patch('/api/profile/socials/telegram', requireAuth, async (req, res) => {
+    const username = normalizeTelegramUsername(req.body?.username)
+    if (!username) return res.status(400).json({ error: 'invalid_username', message: 'Username is required' })
+
+    let oid = null
+    try {
+      oid = new mongoose.Types.ObjectId(String(req.user?.id || ''))
+    } catch {
+      oid = null
+    }
+    if (!oid) return res.status(401).json({ error: 'unauthorized' })
+
+    const db = mongoose.connection.db
+    if (!db) return res.status(500).json({ error: 'mongo_not_available' })
+    const users = db.collection('users')
+
+    const existing = await users.findOne({ _id: oid }, { projection: { socials: 1 }, readPreference: 'primary' })
+    if (!existing) return res.status(404).json({ error: 'user_not_found' })
+
+    const socials =
+      existing.socials && typeof existing.socials === 'object' && !Array.isArray(existing.socials)
+        ? { ...existing.socials }
+        : {}
+    const now = new Date()
+    socials.telegram = {
+      connected: true,
+      username,
+      profileUrl: `https://t.me/${username}`,
+      connectedAt: now,
+    }
+
+    await users.updateOne({ _id: oid }, { $set: { socials, updatedAt: now } })
+    return res.json({ success: true, social: socials.telegram })
+  })
+
+  // PATCH /api/profile/socials/whatsapp — сохранить WhatsApp без OAuth (phone → socials.whatsapp)
+  router.patch('/api/profile/socials/whatsapp', requireAuth, async (req, res) => {
+    const phone = normalizeWhatsAppPhone(req.body?.phone)
+    if (!phone) return res.status(400).json({ error: 'invalid_phone', message: 'Valid phone number is required (10–15 digits)' })
+
+    let oid = null
+    try {
+      oid = new mongoose.Types.ObjectId(String(req.user?.id || ''))
+    } catch {
+      oid = null
+    }
+    if (!oid) return res.status(401).json({ error: 'unauthorized' })
+
+    const db = mongoose.connection.db
+    if (!db) return res.status(500).json({ error: 'mongo_not_available' })
+    const users = db.collection('users')
+
+    const existing = await users.findOne({ _id: oid }, { projection: { socials: 1 }, readPreference: 'primary' })
+    if (!existing) return res.status(404).json({ error: 'user_not_found' })
+
+    const socials =
+      existing.socials && typeof existing.socials === 'object' && !Array.isArray(existing.socials)
+        ? { ...existing.socials }
+        : {}
+    const now = new Date()
+    socials.whatsapp = {
+      connected: true,
+      phone,
+      profileUrl: `https://wa.me/${phone}`,
+      connectedAt: now,
+    }
+
+    await users.updateOne({ _id: oid }, { $set: { socials, updatedAt: now } })
+    return res.json({ success: true, social: socials.whatsapp })
   })
 
   router.patch('/api/me/role', requireAuth, async (req, res) => {
